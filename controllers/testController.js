@@ -49,7 +49,7 @@ export const getTests = async (req, res) => {
 
     const tests = await Test.find(filter)
       .select(
-        "title description duration totalQuestions totalMarks isPublished isPaid testSeries paperType examDate attemptsCount"
+        "title description duration totalQuestions totalMarks isPublished isPaid isActive sections testSeries paperType examDate attemptsCount"
       )
       .sort({ createdAt: -1 })
       .lean();
@@ -75,7 +75,7 @@ export const getTestById = async (req, res) => {
       .populate("testSeries", "name image")
       .lean();
 
-    if (!test || !test.isActive) {
+    if (!test || (!test.isActive && req.user?.role !== "admin")) {
       return res.status(404).json({
         success: false,
         message: "Test not found",
