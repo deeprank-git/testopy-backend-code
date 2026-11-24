@@ -59,3 +59,39 @@ describe("notification links", () => {
     },
   );
 });
+
+describe("DELETE /api/admin/notifications/:id", () => {
+  it("hard-deletes the notification, then 404s on repeat", async () => {
+    const admin = await createUser("admin");
+    const n = await Notification.create({ title: "T", message: "M", user: null });
+
+    const first = await request(app)
+      .delete(`/api/admin/notifications/${n._id}`)
+      .set("Authorization", bearer(admin));
+    expect(first.status).toBe(200);
+    expect(await Notification.countDocuments()).toBe(0);
+
+    const again = await request(app)
+      .delete(`/api/admin/notifications/${n._id}`)
+      .set("Authorization", bearer(admin));
+    expect(again.status).toBe(404);
+  });
+
+  it("404s on a malformed id", async () => {
+    const admin = await createUser("admin");
+    const res = await request(app)
+      .delete("/api/admin/notifications/not-an-id")
+      .set("Authorization", bearer(admin));
+    expect(res.status).toBe(404);
+  });
+
+  it("is admin-only", async () => {
+    const student = await createUser("student");
+    const n = await Notification.create({ title: "T", message: "M", user: null });
+    const res = await request(app)
+      .delete(`/api/admin/notifications/${n._id}`)
+      .set("Authorization", bearer(student));
+    expect(res.status).toBe(403);
+    expect(await Notification.countDocuments()).toBe(1);
+  });
+});

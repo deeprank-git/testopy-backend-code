@@ -1,5 +1,6 @@
 // controllers/notificationController.js
 
+import mongoose from "mongoose";
 import Notification from "../models/Notification.js";
 import { isValidLink, LINK_RULE_MESSAGE } from "../utils/isValidLink.js";
 
@@ -118,6 +119,26 @@ export const getAllNotificationsAdmin = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Error fetching notifications",
+      error: error.message,
+    });
+  }
+};
+
+// ✅ DELETE /api/admin/notifications/:id — hard delete (nothing references notifications)
+export const deleteNotification = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const deleted = mongoose.isValidObjectId(id) ? await Notification.findByIdAndDelete(id) : null;
+
+    if (!deleted) {
+      return res.status(404).json({ success: false, message: "Notification not found" });
+    }
+
+    res.status(200).json({ success: true, message: "Notification deleted" });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Error deleting notification",
       error: error.message,
     });
   }
