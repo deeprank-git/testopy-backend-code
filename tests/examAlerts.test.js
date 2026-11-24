@@ -176,3 +176,74 @@ describe("admin exam alerts", () => {
     expect((await request(app).delete("/api/admin/exam-alerts/nope").set(auth)).status).toBe(404);
   });
 });
+
+describe("POST /api/admin/exam-alerts notify", () => {
+  it("creates exactly one broadcast linking to the student Exam Alerts page", async () => {
+    const admin = await createUser("admin");
+    const res = await request(app)
+      .post("/api/admin/exam-alerts")
+      .set("Authorization", bearer(admin))
+      .send({ ...valid, description: "Exam on 5 Dec", notify: true });
+
+    expect(res.status).toBe(201);
+    expect(res.body.notified).toBe(true);
+    const notes = await Notification.find();
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toMatchObject({
+      user: null,
+      title: "SSC CGL Tier 1",
+      message: "Exam on 5 Dec",
+      type: "info",
+      link: "/dashboard/exam-alerts",
+    });
+    expect(String(notes[0].createdBy)).toBe(String(admin._id));
+  });
+
+  it("uses the formatted date as the message when there is no description", async () => {
+    const admin = await createUser("admin");
+    await request(app)
+      .post("/api/admin/exam-alerts")
+      .set("Authorization", bearer(admin))
+      .send({ ...valid, notify: true });
+    const note = await Notification.findOne();
+    expect(note.message).toMatch(/Dec/);
+    expect(note.message).toMatch(/2026/);
+  });
+
+  it("creates no notification when notify is false", async () => {
+    const admin = await createUser("admin");
+    const res = await request(app)
+      .post("/api/admin/exam-alerts")
+      .set("Authorization", bearer(admin))
+      .send({ ...valid, notify: false });
+    expect(res.body.notified).toBe(false);
+    expect(await Notification.countDocuments()).toBe(0);
+  });
+
+  it("keeps the alert and reports notified: false when the notification insert fails", async () => {
+    const admin = await createUser("admin");
+    const createSpy = jest.spyOn(Notification, "create").mockRejectedValueOnce(new Error("db down"));
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+
+    const res = await request(app)
+      .post("/api/admin/exam-alerts")
+      .set("Authorization", bearer(admin))
+      .send({ ...valid, notify: true });
+
+    createSpy.mockRestore();
+    errorSpy.mockRestore();
+    expect(res.status).toBe(201);
+    expect(res.body.notified).toBe(false);
+    expect(await ExamAlert.countDocuments()).toBe(1);
+  });
+
+  it("never notifies on edit", async () => {
+    const admin = await createUser("admin");
+    const alert = await ExamAlert.create({ ...valid, date: day("2026-12-05") });
+    await request(app)
+      .patch(`/api/admin/exam-alerts/${alert._id}`)
+      .set("Authorization", bearer(admin))
+      .send({ title: "Changed", notify: true });
+    expect(await Notification.countDocuments()).toBe(0);
+  });
+});

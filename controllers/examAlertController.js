@@ -3,6 +3,7 @@
 import mongoose from "mongoose";
 import ExamAlert, { EXAM_ALERT_TYPES } from "../models/ExamAlert.js";
 import Category from "../models/Category.js";
+import Notification from "../models/Notification.js";
 import { isValidLink, LINK_RULE_MESSAGE } from "../utils/isValidLink.js";
 
 const CATEGORY_FIELDS = { path: "category", select: "name slug" };
@@ -97,6 +98,34 @@ export const getAllExamAlertsAdmin = async (req, res) => {
   }
 };
 
+const EXAM_ALERTS_PATH = "/dashboard/exam-alerts";
+
+const formatAlertDate = (date) =>
+  new Date(date).toLocaleDateString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+
+// One broadcast per new alert. Failure is reported, never fatal: the alert stays.
+const notifyStudents = async (alert, adminId) => {
+  try {
+    await Notification.create({
+      user: null,
+      title: alert.title,
+      message: alert.description?.trim() || formatAlertDate(alert.date),
+      type: "info",
+      link: EXAM_ALERTS_PATH,
+      createdBy: adminId,
+    });
+    return true;
+  } catch (error) {
+    console.error("Exam alert notification failed:", error.message);
+    return false;
+  }
+};
+
 // ✅ POST /api/admin/exam-alerts — body may include notify: boolean
 export const createExamAlert = async (req, res) => {
   try {
@@ -108,7 +137,7 @@ export const createExamAlert = async (req, res) => {
       isActive: true,
       createdBy: req.user._id,
     });
-    const notified = false; // Task 12 wires up `notify`
+    const notified = req.body.notify === true ? await notifyStudents(alert, req.user._id) : false;
     await alert.populate(CATEGORY_FIELDS);
 
     res.status(201).json({ success: true, message: "Exam alert created", data: alert, notified });
