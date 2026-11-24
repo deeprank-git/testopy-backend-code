@@ -291,3 +291,55 @@ describe("broadcasts skip admins", () => {
     expect(res.body.data.map((n) => n.title)).toEqual(["Broadcast"]);
   });
 });
+
+describe("GET /api/admin/notifications paging and search", () => {
+  const get = (admin, qs = "") =>
+    request(app).get(`/api/admin/notifications${qs}`).set("Authorization", bearer(admin));
+
+  it("pages newest first and reports total and totalPages", async () => {
+    const admin = await createUser("admin");
+    await Notification.insertMany(
+      Array.from({ length: 5 }, (_, i) => ({
+        title: `N${i}`,
+        message: "m",
+        user: null,
+        createdAt: new Date(Date.UTC(2026, 10, 1 + i)),
+      })),
+    );
+
+    const first = await get(admin, "?limit=2");
+    expect(first.body).toMatchObject({ total: 5, page: 1, totalPages: 3 });
+    expect(first.body.data.map((n) => n.title)).toEqual(["N4", "N3"]);
+
+    const last = await get(admin, "?limit=2&page=3");
+    expect(last.body.data.map((n) => n.title)).toEqual(["N0"]);
+  });
+
+  it("defaults to 15 per page", async () => {
+    const admin = await createUser("admin");
+    await Notification.insertMany(
+      Array.from({ length: 20 }, (_, i) => ({ title: `N${i}`, message: "m", user: null })),
+    );
+    const res = await get(admin);
+    expect(res.body.data).toHaveLength(15);
+    expect(res.body.totalPages).toBe(2);
+  });
+
+  it("searches title and message as literal, case-insensitive text", async () => {
+    const admin = await createUser("admin");
+    await Notification.create([
+      { title: "SSC result out", message: "m", user: null },
+      { title: "Offer", message: "Flat 50% off on ssc packs", user: null },
+      { title: "Other", message: "nothing", user: null },
+      { title: "a.b", message: "m", user: null },
+      { title: "axb", message: "m", user: null },
+    ]);
+
+    const ssc = await get(admin, "?search=SSC");
+    expect(ssc.body.data.map((n) => n.title).sort()).toEqual(["Offer", "SSC result out"]);
+    expect(ssc.body.total).toBe(2);
+
+    const literal = await get(admin, "?search=a.b");
+    expect(literal.body.data.map((n) => n.title)).toEqual(["a.b"]);
+  });
+});

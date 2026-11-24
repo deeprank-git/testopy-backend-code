@@ -3,6 +3,7 @@
 import mongoose from "mongoose";
 import Notification from "../models/Notification.js";
 import { isValidLink, LINK_RULE_MESSAGE } from "../utils/isValidLink.js";
+import { escapeRegex } from "../utils/escapeRegex.js";
 import User from "../models/Users.js";
 import {
   NOTIFICATION_SOURCES,
@@ -147,11 +148,26 @@ export const createNotification = async (req, res) => {
 // audience: "all" (broadcast) | "student" (targeted; user is null if that account was deleted).
 export const getAllNotificationsAdmin = async (req, res) => {
   try {
+    // ?page=1.. ?limit=1..100 (default 15) ?search= (title or message, literal, case-insensitive)
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 15));
+    const page = Math.max(1, Math.floor(Number(req.query.page)) || 1);
+    const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
+    const filter = {};
+    if (search) {
+      const re = new RegExp(escapeRegex(search), "i");
+      filter.$or = [{ title: re }, { message: re }];
+    }
+
     // Not populated: populate turns a deleted user into null, which looks like a broadcast.
-    const rows = await Notification.find()
-      .sort({ createdAt: -1 })
-      .limit(Number(req.query.limit) || 100)
-      .lean();
+    // _id breaks createdAt ties so rows never repeat or vanish across pages.
+    const [rows, total] = await Promise.all([
+      Notification.find(filter)
+        .sort({ createdAt: -1, _id: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      Notification.countDocuments(filter),
+    ]);
 
     const ids = [...new Set(rows.filter((n) => n.user).map((n) => String(n.user)))];
     const users = await User.find({ _id: { $in: ids } }).select("name email").lean();
@@ -163,7 +179,14 @@ export const getAllNotificationsAdmin = async (req, res) => {
         : { ...n, audience: "all", user: null, readCount: readBy?.length ?? 0, source: resolveSource(n) },
     );
 
-    res.status(200).json({ success: true, count: data.length, data });
+    res.status(200).json({
+      success: true,
+      count: data.length,
+      total,
+      page,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+      data,
+    });
   } catch (error) {
     res.status(500).json({
       success: false,
