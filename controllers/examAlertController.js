@@ -5,6 +5,7 @@ import ExamAlert, { EXAM_ALERT_TYPES } from "../models/ExamAlert.js";
 import Category from "../models/Category.js";
 import Notification from "../models/Notification.js";
 import { isValidLink, LINK_RULE_MESSAGE } from "../utils/isValidLink.js";
+import { EXAM_ALERTS_PATH } from "../utils/notificationSource.js";
 
 const CATEGORY_FIELDS = { path: "category", select: "name slug" };
 
@@ -79,9 +80,15 @@ const validateAlert = async (body, { partial = false } = {}) => {
   return null;
 };
 
+// Text fields that "clear" to "" rather than null.
+const CLEARABLE = ["description", "link"];
+
 const pickEditable = (body) => {
   const out = {};
-  for (const key of EDITABLE) if (body[key] !== undefined) out[key] = body[key];
+  for (const key of EDITABLE) {
+    if (body[key] === undefined) continue;
+    out[key] = body[key] === null && CLEARABLE.includes(key) ? "" : body[key];
+  }
   if (body.category !== undefined) out.category = body.category || null;
   return out;
 };
@@ -97,8 +104,6 @@ export const getAllExamAlertsAdmin = async (req, res) => {
     serverError(res, "Error fetching exam alerts", error);
   }
 };
-
-const EXAM_ALERTS_PATH = "/dashboard/exam-alerts";
 
 const formatAlertDate = (date) =>
   new Date(date).toLocaleDateString("en-IN", {
@@ -117,6 +122,7 @@ const notifyStudents = async (alert, adminId) => {
       message: alert.description?.trim() || formatAlertDate(alert.date),
       type: "info",
       link: EXAM_ALERTS_PATH,
+      source: "exam_alert",
       createdBy: adminId,
     });
     return true;
