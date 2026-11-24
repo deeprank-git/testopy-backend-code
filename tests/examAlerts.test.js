@@ -63,6 +63,79 @@ describe("GET /api/exam-alerts (public)", () => {
   });
 });
 
+describe("GET /api/exam-alerts month-of-year, status and paging", () => {
+  const titles = async (qs) =>
+    (await request(app).get(`/api/exam-alerts?${qs}`)).body.data.map((a) => a.title);
+
+  it("filters by month of any year", async () => {
+    await ExamAlert.create([
+      { title: "Dec26", type: "exam_date", date: day("2026-12-05") },
+      { title: "Dec27", type: "exam_date", date: day("2027-12-31") },
+      { title: "Jan27", type: "exam_date", date: day("2027-01-01") },
+    ]);
+    expect(await titles("monthOfYear=12")).toEqual(["Dec27", "Dec26"]);
+  });
+
+  it("splits upcoming (today and later) from past against the viewer's today", async () => {
+    await ExamAlert.create([
+      { title: "Yesterday", type: "result", date: day("2026-11-23") },
+      { title: "Today", type: "result", date: day("2026-11-24") },
+      { title: "Later", type: "result", date: day("2026-12-01") },
+    ]);
+    expect(await titles("status=upcoming&today=2026-11-24")).toEqual(["Later", "Today"]);
+    expect(await titles("status=past&today=2026-11-24")).toEqual(["Yesterday"]);
+    expect(await titles("status=past&today=2026-11-24&monthOfYear=11")).toEqual(["Yesterday"]);
+  });
+
+  it("pages when page is given, reporting total and totalPages", async () => {
+    await ExamAlert.create(
+      [1, 2, 3, 4, 5].map((d) => ({ title: `D${d}`, type: "other", date: day(`2026-12-0${d}`) })),
+    );
+    const res = await request(app).get("/api/exam-alerts?page=2&limit=2");
+    expect(res.body).toMatchObject({ total: 5, page: 2, totalPages: 3 });
+    expect(res.body.data.map((a) => a.title)).toEqual(["D3", "D2"]);
+  });
+
+  it.each(["monthOfYear=13", "monthOfYear=1", "status=soon", "status=upcoming&today=24-11-2026"])(
+    "400s on %s",
+    async (qs) => {
+      expect((await request(app).get(`/api/exam-alerts?${qs}`)).status).toBe(400);
+    },
+  );
+});
+
+describe("GET /api/exam-alerts/summary", () => {
+  it("counts active alerts and lists the categories they use, archived ones included", async () => {
+    const ssc = await Category.create({ name: "SSC" });
+    const old = await Category.create({ name: "Old", isActive: false });
+    await ExamAlert.create([
+      { title: "UpcomingExam", type: "exam_date", date: day("2026-12-05"), category: ssc._id },
+      { title: "PastExam", type: "exam_date", date: day("2026-11-01"), category: old._id },
+      { title: "UpcomingResult", type: "result", date: day("2026-12-05") },
+      { title: "Archived", type: "exam_date", date: day("2026-12-05"), isActive: false },
+    ]);
+    // Created long ago: insert raw so timestamps don't overwrite createdAt.
+    await ExamAlert.collection.insertOne({
+      title: "OldNews",
+      type: "other",
+      date: day("2026-12-05"),
+      isActive: true,
+      category: null,
+      createdAt: new Date("2026-01-01T00:00:00Z"),
+    });
+
+    const res = await request(app).get("/api/exam-alerts/summary?today=2026-11-24");
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({ total: 4, upcomingExams: 1, newThisWeek: 3 });
+    expect(res.body.data.categories.map((c) => c.name)).toEqual(["Old", "SSC"]);
+  });
+
+  it("400s on a malformed today", async () => {
+    expect((await request(app).get("/api/exam-alerts/summary?today=nope")).status).toBe(400);
+  });
+});
+
 const valid = { title: "SSC CGL Tier 1", type: "exam_date", date: "2026-12-05" };
 
 describe("admin exam alerts", () => {
