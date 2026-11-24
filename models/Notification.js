@@ -28,6 +28,13 @@ const notificationSchema = new mongoose.Schema(
       default: "info",
     },
 
+    // Optional click-through: "/in-app/path" or "https://…" (see utils/isValidLink.js).
+    link: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+
     // Only meaningful for targeted (non-broadcast) notifications. For a
     // broadcast (user: null), a single shared isRead would mean one
     // person reading it marks it read for everyone, so broadcasts are

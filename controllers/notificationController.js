@@ -1,6 +1,7 @@
 // controllers/notificationController.js
 
 import Notification from "../models/Notification.js";
+import { isValidLink, LINK_RULE_MESSAGE } from "../utils/isValidLink.js";
 
 // ✅ GET /api/notifications/me — targeted notifications + broadcasts, newest first
 export const getMyNotifications = async (req, res) => {
@@ -72,7 +73,7 @@ export const markAsRead = async (req, res) => {
 // ✅ POST /api/admin/notifications — targeted (userId set) or broadcast (omit userId)
 export const createNotification = async (req, res) => {
   try {
-    const { userId, title, message, type } = req.body;
+    const { userId, title, message, type, link } = req.body;
 
     if (!title || !message) {
       return res.status(400).json({
@@ -81,11 +82,16 @@ export const createNotification = async (req, res) => {
       });
     }
 
+    if (!isValidLink(link)) {
+      return res.status(400).json({ success: false, message: LINK_RULE_MESSAGE });
+    }
+
     const notification = await Notification.create({
       user: userId || null,
       title,
       message,
       type,
+      link: link || "",
       createdBy: req.user.id,
     });
 
