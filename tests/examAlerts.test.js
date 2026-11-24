@@ -249,13 +249,47 @@ describe("POST /api/admin/exam-alerts notify", () => {
     expect(await ExamAlert.countDocuments()).toBe(1);
   });
 
-  it("never notifies on edit", async () => {
+  it("does not notify on edit unless asked", async () => {
     const admin = await createUser("admin");
     const alert = await ExamAlert.create({ ...valid, date: day("2026-12-05") });
-    await request(app)
+    const res = await request(app)
+      .patch(`/api/admin/exam-alerts/${alert._id}`)
+      .set("Authorization", bearer(admin))
+      .send({ title: "Changed" });
+    expect(res.status).toBe(200);
+    expect(res.body.notified).toBe(false);
+    expect(await Notification.countDocuments()).toBe(0);
+  });
+
+  it("notifies on edit when asked, with an Updated: title", async () => {
+    const admin = await createUser("admin");
+    const alert = await ExamAlert.create({ ...valid, date: day("2026-12-05") });
+    const res = await request(app)
+      .patch(`/api/admin/exam-alerts/${alert._id}`)
+      .set("Authorization", bearer(admin))
+      .send({ title: "Changed", description: "Moved to 9 Dec", notify: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.notified).toBe(true);
+    const notes = await Notification.find();
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toMatchObject({
+      user: null,
+      title: "Updated: Changed",
+      message: "Moved to 9 Dec",
+      link: "/dashboard/exam-alerts",
+      source: "exam_alert",
+    });
+  });
+
+  it("does not notify when editing an archived alert", async () => {
+    const admin = await createUser("admin");
+    const alert = await ExamAlert.create({ ...valid, date: day("2026-12-05"), isActive: false });
+    const res = await request(app)
       .patch(`/api/admin/exam-alerts/${alert._id}`)
       .set("Authorization", bearer(admin))
       .send({ title: "Changed", notify: true });
+    expect(res.body.notified).toBe(false);
     expect(await Notification.countDocuments()).toBe(0);
   });
 });

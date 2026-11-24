@@ -113,12 +113,13 @@ const formatAlertDate = (date) =>
     timeZone: "UTC",
   });
 
-// One broadcast per new alert. Failure is reported, never fatal: the alert stays.
-const notifyStudents = async (alert, adminId) => {
+// One broadcast per new (or, when asked, edited) alert. Failure is reported,
+// never fatal: the alert is saved either way.
+const notifyStudents = async (alert, adminId, { updated = false } = {}) => {
   try {
     await Notification.create({
       user: null,
-      title: alert.title,
+      title: updated ? `Updated: ${alert.title}` : alert.title,
       message: alert.description?.trim() || formatAlertDate(alert.date),
       type: "info",
       link: EXAM_ALERTS_PATH,
@@ -152,7 +153,8 @@ export const createExamAlert = async (req, res) => {
   }
 };
 
-// ✅ PATCH /api/admin/exam-alerts/:id — edit any field; isActive: true restores. Never notifies.
+// ✅ PATCH /api/admin/exam-alerts/:id — edit any field; isActive: true restores.
+// notify: true sends an "Updated: …" broadcast, but only for an active alert.
 export const updateExamAlert = async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) return notFound(res);
@@ -166,7 +168,12 @@ export const updateExamAlert = async (req, res) => {
     }).populate(CATEGORY_FIELDS);
     if (!alert) return notFound(res);
 
-    res.status(200).json({ success: true, message: "Exam alert updated", data: alert });
+    const notified =
+      req.body.notify === true && alert.isActive
+        ? await notifyStudents(alert, req.user._id, { updated: true })
+        : false;
+
+    res.status(200).json({ success: true, message: "Exam alert updated", data: alert, notified });
   } catch (error) {
     serverError(res, "Error updating exam alert", error);
   }
