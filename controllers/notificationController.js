@@ -117,9 +117,14 @@ export const getAllNotificationsAdmin = async (req, res) => {
     const notifications = await Notification.find()
       .populate("user", "name email")
       .sort({ createdAt: -1 })
-      .limit(Number(req.query.limit) || 100);
+      .limit(Number(req.query.limit) || 100)
+      .lean();
 
-    res.status(200).json({ success: true, count: notifications.length, data: notifications });
+    const data = notifications.map(({ readBy, ...n }) =>
+      n.user === null ? { ...n, readCount: readBy?.length ?? 0 } : n,
+    );
+
+    res.status(200).json({ success: true, count: data.length, data });
   } catch (error) {
     res.status(500).json({
       success: false,

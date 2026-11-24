@@ -146,3 +146,24 @@ describe("PATCH /api/notifications/read-all", () => {
     expect(seen.readBy).toHaveLength(1); // $addToSet, no duplicate
   });
 });
+
+describe("GET /api/admin/notifications", () => {
+  it("returns readCount for broadcasts and hides the raw readBy array", async () => {
+    const admin = await createUser("admin");
+    const s1 = await createUser("student");
+    const s2 = await createUser("student");
+    await Notification.create([
+      { title: "Broadcast", message: "m", user: null, readBy: [s1._id, s2._id] },
+      { title: "Targeted", message: "m", user: s1._id },
+    ]);
+
+    const res = await request(app).get("/api/admin/notifications").set("Authorization", bearer(admin));
+
+    expect(res.status).toBe(200);
+    const byTitle = Object.fromEntries(res.body.data.map((n) => [n.title, n]));
+    expect(byTitle.Broadcast.readCount).toBe(2);
+    expect(byTitle.Broadcast.readBy).toBeUndefined();
+    expect(byTitle.Targeted.readCount).toBeUndefined();
+    expect(byTitle.Targeted.user.email).toBe(s1.email);
+  });
+});
