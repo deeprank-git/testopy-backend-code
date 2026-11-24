@@ -148,3 +148,21 @@ export const deleteNotification = async (req, res) => {
     });
   }
 };
+
+// ✅ PATCH /api/notifications/read-all — mark everything the caller can see as read
+export const markAllAsRead = async (req, res) => {
+  try {
+    const uid = req.user._id;
+    await Promise.all([
+      Notification.updateMany({ user: uid, isRead: false }, { $set: { isRead: true } }),
+      Notification.updateMany({ user: null, readBy: { $ne: uid } }, { $addToSet: { readBy: uid } }),
+    ]);
+    res.status(200).json({ success: true, message: "All notifications marked as read" });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Error updating notifications",
+      error: error.message,
+    });
+  }
+};

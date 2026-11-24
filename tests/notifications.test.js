@@ -118,3 +118,31 @@ describe("GET /api/notifications/me unreadCount", () => {
     expect(res.body.unreadCount).toBe(61); // 60 unread broadcasts + "Mine"
   });
 });
+
+describe("PATCH /api/notifications/read-all", () => {
+  it("marks targeted and broadcast notifications read for the caller only", async () => {
+    const student = await createUser("student");
+    const other = await createUser("student");
+    await Notification.create([
+      { title: "Mine", message: "m", user: student._id },
+      { title: "Theirs", message: "m", user: other._id },
+      { title: "Broadcast", message: "m", user: null },
+      { title: "AlreadySeen", message: "m", user: null, readBy: [student._id] },
+    ]);
+
+    const res = await request(app)
+      .patch("/api/notifications/read-all")
+      .set("Authorization", bearer(student));
+    expect(res.status).toBe(200);
+
+    const mine = await request(app).get("/api/notifications/me").set("Authorization", bearer(student));
+    expect(mine.body.unreadCount).toBe(0);
+    expect(mine.body.data.every((n) => n.isRead)).toBe(true);
+
+    const theirs = await request(app).get("/api/notifications/me").set("Authorization", bearer(other));
+    expect(theirs.body.unreadCount).toBe(3); // Theirs + Broadcast + AlreadySeen
+
+    const seen = await Notification.findOne({ title: "AlreadySeen" });
+    expect(seen.readBy).toHaveLength(1); // $addToSet, no duplicate
+  });
+});
