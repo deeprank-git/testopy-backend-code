@@ -24,7 +24,12 @@ export const getMyNotifications = async (req, res) => {
       return obj;
     });
 
-    const unreadCount = data.filter((n) => !n.isRead).length;
+    // Count across everything, not just this page (limit defaults to 50).
+    const [targetedUnread, broadcastUnread] = await Promise.all([
+      Notification.countDocuments({ user: req.user._id, isRead: false }),
+      Notification.countDocuments({ user: null, readBy: { $ne: req.user._id } }),
+    ]);
+    const unreadCount = targetedUnread + broadcastUnread;
 
     res.status(200).json({ success: true, count: data.length, unreadCount, data });
   } catch (error) {

@@ -95,3 +95,26 @@ describe("DELETE /api/admin/notifications/:id", () => {
     expect(await Notification.countDocuments()).toBe(1);
   });
 });
+
+describe("GET /api/notifications/me unreadCount", () => {
+  it("counts every unread notification, not just the returned page", async () => {
+    const student = await createUser("student");
+    const other = await createUser("student");
+
+    await Notification.insertMany(
+      Array.from({ length: 60 }, (_, i) => ({ title: `B${i}`, message: "m", user: null })),
+    );
+    await Notification.create([
+      { title: "Mine", message: "m", user: student._id },
+      { title: "MineRead", message: "m", user: student._id, isRead: true },
+      { title: "Theirs", message: "m", user: other._id },
+      { title: "Seen", message: "m", user: null, readBy: [student._id] },
+    ]);
+
+    const res = await request(app).get("/api/notifications/me").set("Authorization", bearer(student));
+
+    expect(res.status).toBe(200);
+    expect(res.body.count).toBe(50); // default page size unchanged
+    expect(res.body.unreadCount).toBe(61); // 60 unread broadcasts + "Mine"
+  });
+});
