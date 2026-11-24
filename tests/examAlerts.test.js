@@ -153,6 +153,17 @@ describe("admin exam alerts", () => {
     expect((await request(app).get("/api/exam-alerts")).body.data).toHaveLength(1);
   });
 
+  it("stores empty strings when link or description is patched with null", async () => {
+    const admin = await createUser("admin");
+    const alert = await ExamAlert.create({ ...valid, date: day("2026-12-05"), description: "D", link: "/exams" });
+    const res = await request(app)
+      .patch(`/api/admin/exam-alerts/${alert._id}`)
+      .set("Authorization", bearer(admin))
+      .send({ link: null, description: null });
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({ link: "", description: "" });
+  });
+
   it("clears the category when patched with null", async () => {
     const admin = await createUser("admin");
     const ssc = await Category.create({ name: "SSC" });
@@ -195,6 +206,7 @@ describe("POST /api/admin/exam-alerts notify", () => {
       message: "Exam on 5 Dec",
       type: "info",
       link: "/dashboard/exam-alerts",
+      source: "exam_alert",
     });
     expect(String(notes[0].createdBy)).toBe(String(admin._id));
   });
