@@ -14,7 +14,10 @@ const NOTIFICATION_TYPES = Notification.schema.path("type").enumValues;
 
 const badRequest = (res, message) => res.status(400).json({ success: false, message });
 
-// ✅ GET /api/notifications/me — targeted + broadcasts, newest first.
+// Broadcasts are "All students" notifications, so admins never receive or read them.
+const receivesBroadcasts = (user) => user.role !== "admin";
+
+// ✅ GET /api/notifications/me — targeted + broadcasts (students only), newest first.
 // Optional: ?type= ?source=manual|exam_alert ?unread=1 ?before=<_id> ?limit=1..50 (default 20)
 export const getMyNotifications = async (req, res) => {
   try {
@@ -32,10 +35,11 @@ export const getMyNotifications = async (req, res) => {
     }
     const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
 
-    const unreadClause = {
-      $or: [{ user: uid, isRead: false }, { user: null, readBy: { $ne: uid } }],
-    };
-    const clauses = [{ $or: [{ user: uid }, { user: null }] }];
+    const broadcasts = receivesBroadcasts(req.user);
+    const unreadClause = broadcasts
+      ? { $or: [{ user: uid, isRead: false }, { user: null, readBy: { $ne: uid } }] }
+      : { user: uid, isRead: false };
+    const clauses = [broadcasts ? { $or: [{ user: uid }, { user: null }] } : { user: uid }];
     if (type) clauses.push({ type });
     if (source) clauses.push(sourceFilter(source));
     if (unread === "1" || unread === "true") clauses.push(unreadClause);
@@ -76,10 +80,10 @@ export const markAsRead = async (req, res) => {
       return res.status(404).json({ success: false, message: "Notification not found" });
     }
 
-    // must be either the targeted recipient or it must be a broadcast
+    // must be either the targeted recipient or a broadcast the caller receives
     const isMine = notification.user && String(notification.user) === String(req.user.id);
     const isBroadcast = notification.user === null;
-    if (!isMine && !isBroadcast) {
+    if (!isMine && !(isBroadcast && receivesBroadcasts(req.user))) {
       return res.status(403).json({ success: false, message: "Forbidden" });
     }
 
@@ -195,7 +199,8 @@ export const markAllAsRead = async (req, res) => {
     const uid = req.user._id;
     await Promise.all([
       Notification.updateMany({ user: uid, isRead: false }, { $set: { isRead: true } }),
-      Notification.updateMany({ user: null, readBy: { $ne: uid } }, { $addToSet: { readBy: uid } }),
+      receivesBroadcasts(req.user) &&
+        Notification.updateMany({ user: null, readBy: { $ne: uid } }, { $addToSet: { readBy: uid } }),
     ]);
     res.status(200).json({ success: true, message: "All notifications marked as read" });
   } catch (error) {

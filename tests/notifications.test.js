@@ -254,3 +254,40 @@ describe("GET /api/notifications/me filters and paging", () => {
     expect((await get(student, qs)).status).toBe(400);
   });
 });
+
+describe("broadcasts skip admins", () => {
+  it("lists only an admin's own targeted notifications and counts only those as unread", async () => {
+    const admin = await createUser("admin");
+    await Notification.create([
+      { title: "Broadcast", message: "m", user: null },
+      { title: "ToAdmin", message: "m", user: admin._id },
+    ]);
+
+    const res = await request(app).get("/api/notifications/me").set("Authorization", bearer(admin));
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.map((n) => n.title)).toEqual(["ToAdmin"]);
+    expect(res.body.unreadCount).toBe(1);
+  });
+
+  it("never records an admin as a broadcast reader", async () => {
+    const admin = await createUser("admin");
+    const b = await Notification.create({ title: "Broadcast", message: "m", user: null });
+    const auth = { Authorization: bearer(admin) };
+
+    const one = await request(app).patch(`/api/notifications/${b._id}/read`).set(auth);
+    expect(one.status).toBe(403);
+
+    const all = await request(app).patch("/api/notifications/read-all").set(auth);
+    expect(all.status).toBe(200);
+
+    expect((await Notification.findById(b._id)).readBy).toHaveLength(0);
+  });
+
+  it("still delivers broadcasts to students", async () => {
+    const student = await createUser("student");
+    await Notification.create({ title: "Broadcast", message: "m", user: null });
+    const res = await request(app).get("/api/notifications/me").set("Authorization", bearer(student));
+    expect(res.body.data.map((n) => n.title)).toEqual(["Broadcast"]);
+  });
+});
