@@ -32,6 +32,14 @@ const categorySchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+
+    // Display sequence (ascending), set by drag-reorder in the admin Exams page.
+    // Ties (e.g. legacy docs all at 0) fall back to name order.
+    order: {
+      type: Number,
+      default: 0,
+      index: true,
+    },
   },
   {
     timestamps: true, // adds createdAt & updatedAt

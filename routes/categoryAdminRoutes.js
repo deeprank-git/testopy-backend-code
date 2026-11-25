@@ -6,7 +6,8 @@ import upload from "../middleware/upload.js";
 import {
   createCategory,
   updateCategory,
-  deleteCategory
+  deleteCategory,
+  reorderCategories
 } from "../controllers/categoryController.js";
 
 const router = express.Router();
@@ -17,6 +18,8 @@ router.use(authMiddleware, authorize("admin"));
 const uploadImage = upload.single("categoryImage");
 
 router.post("/", uploadImage, createCategory);
+// Must precede "/:id" so "reorder" is not captured as an id.
+router.patch("/reorder", reorderCategories);
 router.patch("/:id", uploadImage, updateCategory);
 router.delete("/:id", deleteCategory);
 
