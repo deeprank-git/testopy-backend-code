@@ -67,7 +67,7 @@ export const getTestSeriesById = async (req, res) => {
   try {
     const series = await TestSeries.findById(req.params.id).lean();
 
-    if (!series || !series.isActive) {
+    if (!series || (!series.isActive && req.user?.role !== "admin")) {
       return res.status(404).json({
         success: false,
         message: "Test Series not found",

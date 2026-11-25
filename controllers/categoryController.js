@@ -3,15 +3,35 @@
 import fs from "fs";
 import path from "path";
 import Category from "../models/Category.js";
+import TestSeries from "../models/TestSeries.js";
 import { toUploadUrl } from "../middleware/upload.js";
 
 // ✅ GET all categories
+// Public: active only, minimal fields. Admin + ?admin=true: every category
+// (incl. archived) with description, isActive and a seriesCount of ACTIVE
+// series — powers the admin Exams card grid.
 export const getCategories = async (req, res) => {
   try {
-    const categories = await Category.find({ isActive: true })
-      .select("name slug image")
-      .sort({ name: 1 })
-      .lean();
+    const adminView = req.user?.role === "admin" && req.query.admin === "true";
+
+    const categories = adminView
+      ? await Category.aggregate([
+          { $sort: { name: 1 } },
+          {
+            $lookup: {
+              from: TestSeries.collection.name,
+              let: { categoryId: "$_id" },
+              pipeline: [
+                { $match: { $expr: { $eq: ["$category", "$$categoryId"] }, isActive: true } },
+                { $count: "n" },
+              ],
+              as: "seriesAgg",
+            },
+          },
+          { $addFields: { seriesCount: { $ifNull: [{ $first: "$seriesAgg.n" }, 0] } } },
+          { $project: { seriesAgg: 0 } },
+        ])
+      : await Category.find({ isActive: true }).select("name slug image").sort({ name: 1 }).lean();
 
     res.status(200).json({
       success: true,
@@ -32,7 +52,7 @@ export const getCategoryById = async (req, res) => {
   try {
     const category = await Category.findById(req.params.id).lean();
 
-    if (!category || !category.isActive) {
+    if (!category || (!category.isActive && req.user?.role !== "admin")) {
       return res.status(404).json({
         success: false,
         message: "Category not found",

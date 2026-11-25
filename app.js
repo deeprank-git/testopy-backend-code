@@ -39,6 +39,8 @@ import settingRoutes from "./routes/settingRoutes.js";
 import settingAdminRoutes from "./routes/settingAdminRoutes.js";
 import notificationRoutes from "./routes/notificationRoutes.js";
 import notificationAdminRoutes from "./routes/notificationAdminRoutes.js";
+import examAlertRoutes from "./routes/examAlertRoutes.js";
+import examAlertAdminRoutes from "./routes/examAlertAdminRoutes.js";
 import searchRoutes from "./routes/searchRoutes.js";
 import analyticsAdminRoutes from "./routes/analyticsAdminRoutes.js";
 
@@ -116,6 +118,10 @@ app.use("/api/admin/settings", settingAdminRoutes);
 // ✅ NOTIFICATIONS
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/admin/notifications", notificationAdminRoutes);
+
+// ✅ EXAM ALERTS
+app.use("/api/exam-alerts", examAlertRoutes);
+app.use("/api/admin/exam-alerts", examAlertAdminRoutes);
 
 // ✅ GLOBAL SEARCH
 app.use("/api/search", searchRoutes);

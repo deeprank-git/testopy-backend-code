@@ -6,6 +6,7 @@ import generateToken from '../utils/generateToken.js';
 import crypto from 'crypto';
 import { sendPasswordResetOtpEmail } from '../utils/emailService.js';
 import { toUploadUrl } from '../middleware/upload.js';
+import { escapeRegex } from '../utils/escapeRegex.js';
 
 // Mongo duplicate-key error (e.g. email or username already taken) —
 // surfaced as a 400 with the offending field name instead of a generic 500.
@@ -348,7 +349,19 @@ export const getAllUsers = async (req, res) => {
         if (req.query.role) filter.role = req.query.role;
         if (req.query.isActive !== undefined) filter.isActive = req.query.isActive === "true";
 
-        const users = await User.find(filter).select("-password").sort({ createdAt: -1 });
+        // Optional ?search= (name or email, literal, case-insensitive) and ?limit=1..100.
+        // Without them every matching user is returned, as the Users page expects.
+        const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
+        if (search) {
+            const re = new RegExp(escapeRegex(search), "i");
+            filter.$or = [{ name: re }, { email: re }];
+        }
+
+        let query = User.find(filter).select("-password").sort({ createdAt: -1 });
+        if (req.query.limit !== undefined) {
+            query = query.limit(Math.min(100, Math.max(1, Number(req.query.limit) || 1)));
+        }
+        const users = await query;
 
         res.status(200).json({ success: true, count: users.length, data: users });
     } catch (error) {

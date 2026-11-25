@@ -28,6 +28,21 @@ const notificationSchema = new mongoose.Schema(
       default: "info",
     },
 
+    // Optional click-through: "/in-app/path" or "https://…" (see utils/isValidLink.js).
+    link: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+
+    // "manual" (admin compose) or "exam_alert" (sent when an alert is created).
+    // No default on purpose: Mongoose applies defaults to old documents on load,
+    // which would hide which rows predate this field. See utils/notificationSource.js.
+    source: {
+      type: String,
+      enum: ["manual", "exam_alert"],
+    },
+
     // Only meaningful for targeted (non-broadcast) notifications. For a
     // broadcast (user: null), a single shared isRead would mean one
     // person reading it marks it read for everyone, so broadcasts are
