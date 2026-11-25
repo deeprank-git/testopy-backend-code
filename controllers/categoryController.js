@@ -1,6 +1,7 @@
 // controllers/category.controller.js
 
 import fs from "fs";
+import mongoose from "mongoose";
 import path from "path";
 import Category from "../models/Category.js";
 import TestSeries from "../models/TestSeries.js";
@@ -16,7 +17,7 @@ export const getCategories = async (req, res) => {
 
     const categories = adminView
       ? await Category.aggregate([
-          { $sort: { name: 1 } },
+          { $sort: { order: 1, name: 1 } },
           {
             $lookup: {
               from: TestSeries.collection.name,
@@ -31,7 +32,7 @@ export const getCategories = async (req, res) => {
           { $addFields: { seriesCount: { $ifNull: [{ $first: "$seriesAgg.n" }, 0] } } },
           { $project: { seriesAgg: 0 } },
         ])
-      : await Category.find({ isActive: true }).select("name slug image").sort({ name: 1 }).lean();
+      : await Category.find({ isActive: true }).select("name slug image order").sort({ order: 1, name: 1 }).lean();
 
     res.status(200).json({
       success: true,
@@ -77,9 +78,13 @@ export const createCategory = async (req, res) => {
   try {
     const { name, description } = req.body;
 
+    // New categories go to the end of the current sequence.
+    const last = await Category.findOne().sort({ order: -1 }).select("order").lean();
+
     const category = await Category.create({
       name,
       description,
+      order: (last?.order ?? -1) + 1,
       image: req.file ? toUploadUrl(req.file) : "",
     });
 
@@ -138,6 +143,36 @@ export const updateCategory = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Error updating category",
+      error: error.message,
+    });
+  }
+};
+
+// ✅ REORDER categories (Admin) — body: { ids: [id, ...] } in display order.
+// Each listed category gets order = its index; unlisted ones are untouched.
+export const reorderCategories = async (req, res) => {
+  const { ids } = req.body ?? {};
+  if (!Array.isArray(ids) || !ids.every((id) => mongoose.isValidObjectId(id))) {
+    return res.status(400).json({
+      success: false,
+      message: "ids must be an array of category ids",
+    });
+  }
+
+  try {
+    if (ids.length) {
+      await Category.bulkWrite(
+        ids.map((id, index) => ({
+          updateOne: { filter: { _id: id }, update: { $set: { order: index } } },
+        }))
+      );
+    }
+
+    res.status(200).json({ success: true, message: "Categories reordered" });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Error reordering categories",
       error: error.message,
     });
   }
