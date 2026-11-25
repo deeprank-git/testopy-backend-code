@@ -5,6 +5,8 @@ import ExamAlert, { EXAM_ALERT_TYPES } from "../models/ExamAlert.js";
 import Category from "../models/Category.js";
 import Notification from "../models/Notification.js";
 import { isValidLink, LINK_RULE_MESSAGE } from "../utils/isValidLink.js";
+import { EXAM_ALERTS_PATH } from "../utils/notificationSource.js";
+import { todayUtcMidnight } from "../utils/dateOnly.js";
 
 const CATEGORY_FIELDS = { path: "category", select: "name slug" };
 
@@ -24,33 +26,112 @@ const monthRange = (month) => {
   };
 };
 
-// ✅ GET /api/exam-alerts — public; active only. Optional ?type= ?category= ?month=YYYY-MM
+// "YYYY-MM-DD" (the viewer's local day) → that day's UTC midnight, the way alert
+// dates are stored. Missing → server's UTC today. Malformed → null.
+const parseToday = (value) => {
+  if (value === undefined) return todayUtcMidnight();
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const d = new Date(`${value}T00:00:00.000Z`);
+  return Number.isNaN(d.getTime()) ? null : d;
+};
+
+const badRequest = (res, message) => res.status(400).json({ success: false, message });
+
+// ✅ GET /api/exam-alerts — public; active only, latest date first.
+// Optional: ?type= ?category= ?month=YYYY-MM ?monthOfYear=MM (any year)
+//   ?status=upcoming|past (against ?today=YYYY-MM-DD, the viewer's day)
+//   ?page=1.. ?limit=1..50 (default 10) — without page, every match is returned.
 export const getExamAlerts = async (req, res) => {
   try {
-    const { type, category, month } = req.query;
-    const filter = { isActive: true };
+    const { type, category, month, monthOfYear, status } = req.query;
+    const clauses = [{ isActive: true }];
 
-    if (type) filter.type = String(type);
+    if (type) clauses.push({ type: String(type) });
 
     if (category) {
       if (!mongoose.isValidObjectId(category)) {
-        return res.status(200).json({ success: true, count: 0, data: [] });
+        return res.status(200).json({ success: true, count: 0, total: 0, page: 1, totalPages: 1, data: [] });
       }
-      filter.category = category;
+      clauses.push({ category });
     }
 
     if (month) {
       const range = monthRange(String(month));
-      if (!range) {
-        return res.status(400).json({ success: false, message: "month must be YYYY-MM" });
-      }
-      filter.date = range;
+      if (!range) return badRequest(res, "month must be YYYY-MM");
+      clauses.push({ date: range });
     }
 
-    const alerts = await ExamAlert.find(filter).populate(CATEGORY_FIELDS).sort({ date: -1 });
-    res.status(200).json({ success: true, count: alerts.length, data: alerts });
+    if (monthOfYear !== undefined) {
+      if (!/^(0[1-9]|1[0-2])$/.test(String(monthOfYear))) {
+        return badRequest(res, "monthOfYear must be 01..12");
+      }
+      // Dates are UTC midnight, and $month reads UTC.
+      clauses.push({ $expr: { $eq: [{ $month: "$date" }, Number(monthOfYear)] } });
+    }
+
+    if (status !== undefined) {
+      if (status !== "upcoming" && status !== "past") {
+        return badRequest(res, "status must be upcoming or past");
+      }
+      const today = parseToday(req.query.today);
+      if (!today) return badRequest(res, "today must be YYYY-MM-DD");
+      clauses.push({ date: status === "upcoming" ? { $gte: today } : { $lt: today } });
+    }
+
+    const filter = { $and: clauses };
+    const query = ExamAlert.find(filter).populate(CATEGORY_FIELDS).sort({ date: -1, _id: -1 });
+
+    if (req.query.page === undefined) {
+      const alerts = await query;
+      return res.status(200).json({ success: true, count: alerts.length, data: alerts });
+    }
+
+    const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 10));
+    const page = Math.max(1, Math.floor(Number(req.query.page)) || 1);
+    const [alerts, total] = await Promise.all([
+      query.skip((page - 1) * limit).limit(limit),
+      ExamAlert.countDocuments(filter),
+    ]);
+    res.status(200).json({
+      success: true,
+      count: alerts.length,
+      total,
+      page,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+      data: alerts,
+    });
   } catch (error) {
     serverError(res, "Error fetching exam alerts", error);
+  }
+};
+
+// ✅ GET /api/exam-alerts/summary — public. ?today=YYYY-MM-DD (viewer's day).
+// Page header counts, plus every category an active alert uses (archived ones
+// included) so the category filter can offer them.
+export const getExamAlertSummary = async (req, res) => {
+  try {
+    const today = parseToday(req.query.today);
+    if (!today) return badRequest(res, "today must be YYYY-MM-DD");
+
+    const active = { isActive: true };
+    const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const [total, upcomingExams, newThisWeek, categoryIds] = await Promise.all([
+      ExamAlert.countDocuments(active),
+      ExamAlert.countDocuments({ ...active, type: "exam_date", date: { $gte: today } }),
+      ExamAlert.countDocuments({ ...active, createdAt: { $gte: weekAgo } }),
+      ExamAlert.distinct("category", { ...active, category: { $ne: null } }),
+    ]);
+    const categories = await Category.find({ _id: { $in: categoryIds } })
+      .select("name slug")
+      .sort({ name: 1 })
+      .lean();
+
+    res.status(200).json({
+      success: true,
+      data: { total, upcomingExams, newThisWeek, categories },
+    });
+  } catch (error) {
+    serverError(res, "Error fetching exam alert summary", error);
   }
 };
 
@@ -79,9 +160,15 @@ const validateAlert = async (body, { partial = false } = {}) => {
   return null;
 };
 
+// Text fields that "clear" to "" rather than null.
+const CLEARABLE = ["description", "link"];
+
 const pickEditable = (body) => {
   const out = {};
-  for (const key of EDITABLE) if (body[key] !== undefined) out[key] = body[key];
+  for (const key of EDITABLE) {
+    if (body[key] === undefined) continue;
+    out[key] = body[key] === null && CLEARABLE.includes(key) ? "" : body[key];
+  }
   if (body.category !== undefined) out.category = body.category || null;
   return out;
 };
@@ -98,8 +185,6 @@ export const getAllExamAlertsAdmin = async (req, res) => {
   }
 };
 
-const EXAM_ALERTS_PATH = "/dashboard/exam-alerts";
-
 const formatAlertDate = (date) =>
   new Date(date).toLocaleDateString("en-IN", {
     day: "2-digit",
@@ -108,15 +193,17 @@ const formatAlertDate = (date) =>
     timeZone: "UTC",
   });
 
-// One broadcast per new alert. Failure is reported, never fatal: the alert stays.
-const notifyStudents = async (alert, adminId) => {
+// One broadcast per new (or, when asked, edited) alert. Failure is reported,
+// never fatal: the alert is saved either way.
+const notifyStudents = async (alert, adminId, { updated = false } = {}) => {
   try {
     await Notification.create({
       user: null,
-      title: alert.title,
+      title: updated ? `Updated: ${alert.title}` : alert.title,
       message: alert.description?.trim() || formatAlertDate(alert.date),
       type: "info",
       link: EXAM_ALERTS_PATH,
+      source: "exam_alert",
       createdBy: adminId,
     });
     return true;
@@ -146,7 +233,8 @@ export const createExamAlert = async (req, res) => {
   }
 };
 
-// ✅ PATCH /api/admin/exam-alerts/:id — edit any field; isActive: true restores. Never notifies.
+// ✅ PATCH /api/admin/exam-alerts/:id — edit any field; isActive: true restores.
+// notify: true sends an "Updated: …" broadcast, but only for an active alert.
 export const updateExamAlert = async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) return notFound(res);
@@ -160,7 +248,12 @@ export const updateExamAlert = async (req, res) => {
     }).populate(CATEGORY_FIELDS);
     if (!alert) return notFound(res);
 
-    res.status(200).json({ success: true, message: "Exam alert updated", data: alert });
+    const notified =
+      req.body.notify === true && alert.isActive
+        ? await notifyStudents(alert, req.user._id, { updated: true })
+        : false;
+
+    res.status(200).json({ success: true, message: "Exam alert updated", data: alert, notified });
   } catch (error) {
     serverError(res, "Error updating exam alert", error);
   }
