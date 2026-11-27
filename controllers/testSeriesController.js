@@ -4,25 +4,8 @@ import fs from "fs";
 import path from "path";
 import TestSeries from "../models/TestSeries.js";
 import { toUploadUrl } from "../middleware/upload.js";
-
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-
-// Every importantDates value must be an exact { from, to } date range (a
-// single day is just from === to) — free-text entries like "July 2025" or
-// "24/10/2025" are rejected so the data stays sortable/comparable.
-const validateImportantDates = (importantDates) => {
-  for (const [label, value] of Object.entries(importantDates)) {
-    const valid =
-      value &&
-      typeof value === "object" &&
-      DATE_RE.test(value.from) &&
-      DATE_RE.test(value.to) &&
-      new Date(value.from) <= new Date(value.to);
-    if (!valid) {
-      throw new Error(`"${label}" must be { from: "YYYY-MM-DD", to: "YYYY-MM-DD" } with from <= to`);
-    }
-  }
-};
+// importantDates entries: exact { from, to }, free { text }, or both — see utils/importantDates.js.
+import { parseImportantDatesField } from "../utils/importantDates.js";
 
 // ✅ GET all (filter by category optional)
 // Students/instructors only see published + active series. Admin sees all.
@@ -104,8 +87,7 @@ export const createTestSeries = async (req, res) => {
 
     if (importantDates !== undefined) {
       try {
-        payload.importantDates = JSON.parse(importantDates);
-        validateImportantDates(payload.importantDates);
+        payload.importantDates = parseImportantDatesField(importantDates);
       } catch (parseError) {
         return res.status(400).json({
           success: false,
@@ -143,7 +125,17 @@ export const updateTestSeries = async (req, res) => {
     const { importantDates, ...rest } = req.body;
     const payload = { ...rest };
 
-    if (importantDates !== undefined) payload.importantDates = JSON.parse(importantDates);
+    // Same rules as create (this path used to skip validation entirely).
+    if (importantDates !== undefined) {
+      try {
+        payload.importantDates = parseImportantDatesField(importantDates);
+      } catch (parseError) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid importantDates: ${parseError.message}`,
+        });
+      }
+    }
 
     if (req.files?.image?.[0] || req.files?.notificationPdf?.[0]) {
       const existing = await TestSeries.findById(req.params.id);
