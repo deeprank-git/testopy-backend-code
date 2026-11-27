@@ -40,6 +40,14 @@ const categorySchema = new mongoose.Schema(
       default: 0,
       index: true,
     },
+
+    // Testbook super-group _id, set by scripts/importTestbookExams.js so
+    // re-imports can recognise a category even after it's renamed.
+    testbookId: {
+      type: String,
+      index: true,
+      sparse: true,
+    },
   },
   {
     timestamps: true, // adds createdAt & updatedAt

@@ -96,6 +96,14 @@ const testSeriesSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
     },
+
+    // Testbook target _id, set by scripts/importTestbookExams.js so re-imports
+    // can recognise an exam even after it's renamed.
+    testbookId: {
+      type: String,
+      index: true,
+      sparse: true,
+    },
   },
   { timestamps: true }
 );
