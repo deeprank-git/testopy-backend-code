@@ -12,9 +12,12 @@
 //   node scripts/importTestbookExams.js --details         # also fill empty officialWebsite /
 //                                                         #   importantDates from each exam page
 //   node scripts/importTestbookExams.js --details --dry-run --limit 20   # preview details, no DB
+//   node scripts/importTestbookExams.js --logos           # also download exam logos into empty
+//                                                         #   exam images (run ON THE SERVER machine)
 //
-// --limit N caps how many exam pages --details reads (default: all, ~1,600
-// pages, roughly 30–60 min). See scripts/testbookExamDetails.js.
+// --limit N caps how many exam pages --details reads and how many logos
+// --logos downloads (default: all, ~1,600 each). See
+// scripts/testbookExamDetails.js and scripts/testbookExamLogos.js.
 //
 // Matching: a record is matched by its stored testbookId first, then by
 // slug (series) or slug/name (categories), so exams Testbook later renames
@@ -29,8 +32,10 @@
 //
 // New series are created unpublished (TestSeries default), so they stay
 // hidden from students until an admin adds tests and publishes them.
-// Testbook logos are not imported — they're another site's branding, and
-// resolveMediaUrl on the frontend would rewrite their absolute CDN URLs anyway.
+// Images are not set by the import itself. --logos downloads each EXAM's logo
+// and stores it as a normal upload (never as a CDN link — resolveMediaUrl on
+// the frontend would rewrite absolute URLs), only where the exam has no image.
+// Category icons are not fetched; use scripts/importCategoryLogos.js.
 
 import path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
@@ -40,6 +45,8 @@ import Category from "../models/Category.js";
 import TestSeries from "../models/TestSeries.js";
 import { slugify } from "../utils/slugify.js";
 import { fillExamDetails } from "./testbookExamDetails.js";
+import { fillExamLogos } from "./testbookExamLogos.js";
+import { serverUploadDir } from "./uploadFiles.js";
 
 const EXAMS_PAGE_URL = "https://testbook.com/exams";
 const TARGETS_API_URL = (superGroupId) => `https://api.testbook.com/api/v1/tsg/${superGroupId}/targets`;
@@ -78,7 +85,9 @@ export function buildImportPlan(categories, { includeEmpty = false } = {}) {
 
       const primary = target.properties.superGroupInfo?.find((s) => s.isPrimary)?._id;
       const home = primary && categoryIds.has(primary) ? primary : category.id;
-      examsByCategory.get(home).push({ name, slug, testbookId: target._id, pageSlug: target.slug });
+      examsByCategory
+        .get(home)
+        .push({ name, slug, testbookId: target._id, pageSlug: target.slug, logo: target.properties.logo });
       placed.add(slug);
     }
   }
@@ -233,8 +242,14 @@ export async function fetchTestbookCatalogue() {
 }
 
 function parseArgs(argv) {
-  const opts = { dryRun: false, includeEmpty: false, update: false, details: false, limit: Infinity };
-  const flags = { "--dry-run": "dryRun", "--include-empty": "includeEmpty", "--update": "update", "--details": "details" };
+  const opts = { dryRun: false, includeEmpty: false, update: false, details: false, logos: false, limit: Infinity };
+  const flags = {
+    "--dry-run": "dryRun",
+    "--include-empty": "includeEmpty",
+    "--update": "update",
+    "--details": "details",
+    "--logos": "logos",
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (flags[a]) opts[flags[a]] = true;
@@ -243,7 +258,9 @@ function parseArgs(argv) {
       if (!Number.isInteger(opts.limit) || opts.limit < 1) throw new Error("--limit needs a positive whole number");
     } else throw new Error(`Unknown option: ${a}`);
   }
-  if (opts.limit !== Infinity && !opts.details) throw new Error("--limit only applies with --details");
+  if (opts.limit !== Infinity && !opts.details && !opts.logos) {
+    throw new Error("--limit only applies with --details or --logos");
+  }
   return opts;
 }
 
@@ -292,8 +309,46 @@ async function runDetails(plan, { dryRun, limit }) {
   );
 }
 
+async function fetchImage(url, attempts = 3) {
+  for (let i = 1; ; i++) {
+    try {
+      const res = await fetch(url, { headers: { "User-Agent": USER_AGENT }, signal: AbortSignal.timeout(30_000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = Buffer.from(await res.arrayBuffer());
+      await new Promise((r) => setTimeout(r, 150)); // be polite
+      return { contentType: res.headers.get("content-type") ?? "", data };
+    } catch (err) {
+      if (i >= attempts) throw err;
+      await new Promise((r) => setTimeout(r, 1000 * i));
+    }
+  }
+}
+
+async function runLogos(plan, { limit, uploadDir }) {
+  console.log("\nDownloading exam logos for exams with no image …");
+  const s = await fillExamLogos(plan, {
+    fetchImage,
+    uploadDir,
+    limit,
+    onProgress: (done, total) => {
+      if (done % 100 === 0 || done === total) console.log(`  ${done}/${total} logos`);
+    },
+  });
+  if (s.failed.length) {
+    console.log("\nLogos that couldn't be saved:");
+    for (const f of s.failed) console.log(`  ${f.exam}: ${f.error}`);
+  }
+  console.log(
+    `\nLogos: ${s.set} exam image(s) set, ${s.failed.length} failed, of ${s.total} exam(s) with no image. ` +
+      `${s.noLogo} exam(s) have no logo.`
+  );
+}
+
 async function main() {
-  const { dryRun, includeEmpty, update, details, limit } = parseArgs(process.argv.slice(2));
+  const { dryRun, includeEmpty, update, details, logos, limit } = parseArgs(process.argv.slice(2));
+  const backendRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
+  // Check before any network work: logos must land in the server's uploads/.
+  const uploadDir = logos && !dryRun ? serverUploadDir(backendRoot) : null;
 
   console.log(`Fetching ${EXAMS_PAGE_URL} …`);
   const plan = buildImportPlan(await fetchTestbookCatalogue(), { includeEmpty });
@@ -303,11 +358,15 @@ async function main() {
 
   if (dryRun) {
     if (details) await runDetails(plan, { dryRun, limit });
+    if (logos) {
+      const withLogo = plan.flatMap((c) => c.exams).filter((e) => e.logo).length;
+      console.log(`\nLogos: ${withLogo} of ${total} exams have a logo; a real run downloads them for exams with no image.`);
+    }
     console.log("\nDry run — nothing written.");
     return;
   }
 
-  dotenv.config({ path: path.join(path.dirname(fileURLToPath(import.meta.url)), "..", ".env") });
+  dotenv.config({ path: path.join(backendRoot, ".env") });
   if (!process.env.mongoDB_URL) throw new Error("mongoDB_URL is not set (.env).");
   const { default: connectDB } = await import("../db.js");
   await connectDB();
@@ -323,6 +382,7 @@ async function main() {
       for (const c of s.conflicts) console.log(`  ${c}`);
     }
     if (details) await runDetails(plan, { dryRun, limit });
+    if (logos) await runLogos(plan, { limit, uploadDir });
   } finally {
     await mongoose.disconnect();
   }
