@@ -4,16 +4,22 @@
 // (e.g. https://testbook.com/ssc-cgl-exam) and fills two TestSeries fields,
 // ONLY when they're still empty (admin data is never overwritten):
 //   officialWebsite — the external link in the page's overview table
-//   importantDates  — { label: { from, to } } from the page's date tables
+//   importantDates  — { label: { from?, to?, text? } } from the page's date tables
 //
 // Testbook writes dates as free text ("22nd June 2026 25th June 2026",
-// "21st September", "December 2026", "TBA"). Only values that parse to exact
-// days are kept — what the API's validateImportantDates accepts — and the
-// rest are returned as `skipped` so admins can fill them in by hand.
+// "21st September", "December 2026", "TBA"). Each row is stored in the shape
+// utils/importantDates.js accepts:
+//   exact day(s)      -> { from, to }, plus { text } for a bracketed note
+//                        such as "(Extended)"
+//   anything else that still names a month or "TBA"-style status
+//                     -> { text } as written ("December 2026")
+// Text that mentions Testbook, links, sites or apps is never stored. Rows
+// that fit neither shape are returned as `skipped` for admins.
 // Eligibility, pattern, syllabus and other prose are deliberately not copied.
 
 import TestSeries from "../models/TestSeries.js";
 import { isValidLink } from "../utils/isValidLink.js";
+import { IMPORTANT_DATE_TEXT_MAX } from "../utils/importantDates.js";
 
 const MONTHS = {
   jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3, apr: 4, april: 4, may: 5,
@@ -152,7 +158,38 @@ function externalLinks(html) {
 
 const MAX_DATES = 15;
 
-// Pure: one exam page's HTML -> what we'd fill, plus the date rows we couldn't read.
+// Never store text that points somewhere else — the source site, links, apps.
+const BLOCKED_TEXT = /testbook|https?:|www\.|\b[\w-]+\.(?:com|in|org|net|gov|co)\b|click|check (?:here|now|out)|download|\blinks?\b|\bapps?\b|telegram|whatsapp|youtube|subscribe|enroll|mock test|test series|coaching/i;
+const STATUS_TEXT = /\btba\b|\btbd\b|to be (?:announced|notified|released|declared|updated|decided)|notified soon|announced soon|awaited|expected|tentative|onwards/i;
+// A month only counts next to a day or year ("October 2026", "10th September"),
+// so prose like "multiple entries may lead to…" isn't mistaken for a date.
+const MONTH_WORD = new RegExp(`\\b\\d{1,2}${ORD}\\s+(?:${MONTH_RE})\\b|\\b(?:${MONTH_RE})\\.?,?\\s+\\d{1,4}\\b`, "i");
+
+const cleanText = (s) => {
+  const t = s.replace(/\s+/g, " ").replace(/^[\s,;:–-]+|[\s,;:–-]+$/g, "").trim();
+  if (!t || BLOCKED_TEXT.test(t)) return "";
+  return t.length <= IMPORTANT_DATE_TEXT_MAX ? t : t.slice(0, IMPORTANT_DATE_TEXT_MAX - 1).replace(/\s+\S*$/, "") + "…";
+};
+const capitalise = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
+
+// Note to keep beside exact dates: bracketed remarks and "onwards".
+// "26th July 2026(Extended)" -> "Extended"; "1st Nov 2026 onwards" -> "Onwards".
+function noteFor(value) {
+  const parts = [...value.matchAll(/\(([^)]*)\)/g)].map((m) => cleanText(m[1])).filter(Boolean);
+  if (/\bonwards\b/i.test(value.replace(/\([^)]*\)/g, ""))) parts.unshift("onwards");
+  return cleanText([...new Set(parts.map(capitalise))].join("; "));
+}
+
+// Free-text value worth showing when there's no exact day: it must still say
+// something about timing (a month, or TBA-style status).
+function dateTextFor(value) {
+  const text = cleanText(value);
+  return text && (MONTH_WORD.test(text) || STATUS_TEXT.test(text)) ? text : "";
+}
+
+const hasTimingInfo = (entry) => !!entry.from || MONTH_WORD.test(entry.text ?? "");
+
+// Pure: one exam page's HTML -> what we'd fill, plus the date rows we couldn't use.
 export function parseExamPage(html, examName) {
   let officialWebsite = "";
   const importantDates = {};
@@ -172,6 +209,7 @@ export function parseExamPage(html, examName) {
       if (row.cells.length !== 2) continue;
       const [label, value] = row.cells;
       if (!label || !value || /^(particulars|events?|details|dates?)\b/i.test(label)) continue;
+      if (BLOCKED_TEXT.test(label)) continue;
 
       if (!officialWebsite && (isOverview || WEBSITE_LABEL.test(label))) {
         officialWebsite = externalLinks(row.html)[0] ?? "";
@@ -179,18 +217,25 @@ export function parseExamPage(html, examName) {
 
       if (!isDateTable && !DATE_LABEL.test(label)) continue;
       const range = parseDateRange(value);
-      if (!range) {
-        if (findDateTokens(value).length || /\b(19|20)\d{2}\b|tba|to be announced|notified soon/i.test(value)) {
-          skipped.push({ label, value });
+      let entry;
+      if (range) {
+        const note = noteFor(value);
+        entry = note ? { ...range, text: note } : range;
+      } else {
+        const text = dateTextFor(value);
+        if (!text) {
+          if (findDateTokens(value).length || /\b(19|20)\d{2}\b/.test(value)) skipped.push({ label, value });
+          continue;
         }
-        continue;
+        entry = { text };
       }
+
       const key = cleanLabel(label, examName);
-      const valueKey = `${range.from}|${range.to}`;
+      const valueKey = entry.from ? `${entry.from}|${entry.to}` : entry.text.toLowerCase();
       // Overview tables repeat the dedicated date table under other labels.
-      if (importantDates[key] || (!isDateTable && seenValues.has(valueKey))) continue;
+      if (!key || importantDates[key] || (!isDateTable && seenValues.has(valueKey))) continue;
       if (Object.keys(importantDates).length >= MAX_DATES) break;
-      importantDates[key] = range;
+      importantDates[key] = entry;
       seenValues.add(valueKey);
     }
   }
@@ -254,7 +299,9 @@ export async function fillExamDetails(
     if (parsed.skipped.length) stats.skipped.push({ exam: exam.name, rows: parsed.skipped });
 
     const website = needWebsite && parsed.officialWebsite;
-    const dates = needDates && Object.keys(parsed.importantDates).length > 0 && parsed.importantDates;
+    // A set that's only "TBA" isn't saved: it would mark the field as filled
+    // and stop a later run from adding the real dates once they're announced.
+    const dates = needDates && Object.values(parsed.importantDates).some(hasTimingInfo) && parsed.importantDates;
     if (!website && !dates) {
       stats.noData++;
       return;

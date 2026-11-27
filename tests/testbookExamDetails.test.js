@@ -2,6 +2,7 @@ import { connectTestDb, disconnectTestDb, clearTestDb } from "./testDb.js";
 import Category from "../models/Category.js";
 import TestSeries from "../models/TestSeries.js";
 import { parseDateRange, parseExamPage, fillExamDetails } from "../scripts/testbookExamDetails.js";
+import { normalizeImportantDates } from "../utils/importantDates.js";
 
 beforeAll(connectTestDb);
 afterAll(disconnectTestDb);
@@ -52,28 +53,43 @@ const page = `
   <tr><td>SSC CGL City Intimation Slip 2026</td><td>21st September</td></tr>
   <tr><td>Tier 1 Exam Date</td><td>30th September to 30th October 2026</td></tr>
   <tr><td>Tier 2 Exam Date</td><td>December 2026</td></tr>
+  <tr><td>Interview</td><td>TBA</td></tr>
+  <tr><td>One Application Rule</td><td>Multiple entries may lead to disqualification.</td></tr>
+  <tr><td>Fee Payment Last Date</td><td>26th June 2026 (Extended)</td></tr>
+  <tr><td>Result</td><td>Check on the Testbook app</td></tr>
+  <tr><td>Exam Cycle</td><td>Phase XIV/2026</td></tr>
+  <tr><td>Answer Key</td><td>2nd Nov 2026 (visit testbook.com)</td></tr>
+  <tr><td>Testbook Pass Offer</td><td>Till 30th Nov 2026</td></tr>
 </table>
 <h2>SSC CGL Salary 2026</h2>
 <table><tr><td>Basic Pay</td><td>1st July 2026</td></tr></table>
 <p><a href="https://www.youtube.com/x">video</a></p>`;
 
 describe("parseExamPage", () => {
-  it("extracts the official website and exact dates, and reports unreadable ones", () => {
-    expect(parseExamPage(page, "SSC CGL")).toEqual({
+  it("extracts the official website and dates as exact days, text, or both", () => {
+    const parsed = parseExamPage(page, "SSC CGL");
+    expect(parsed).toEqual({
       officialWebsite: "https://ssc.gov.in/",
       importantDates: {
         "Notification Release Date": { from: "2026-05-21", to: "2026-05-21" },
         "Last Date to Apply": { from: "2026-06-22", to: "2026-06-22" },
         // Multi-cycle rows (3+ cells) are ignored: the old cycle's dates would be stale.
+        "City Intimation Slip": { text: "21st September" },
         "Tier 1 Exam Date": { from: "2026-09-30", to: "2026-10-30" },
+        "Tier 2 Exam Date": { text: "December 2026" },
+        Interview: { text: "TBA" },
+        "Fee Payment Last Date": { from: "2026-06-26", to: "2026-06-26", text: "Extended" },
+        // Exact date kept; the note pointing at another site is dropped.
+        "Answer Key": { from: "2026-11-02", to: "2026-11-02" },
         // From the overview; its "Notification" row repeats a date already taken.
         "Application End Date": { from: "2026-06-25", to: "2026-06-25" },
       },
-      skipped: [
-        { label: "SSC CGL City Intimation Slip 2026", value: "21st September" },
-        { label: "Tier 2 Exam Date", value: "December 2026" },
-      ],
+      // "Check on the Testbook app" and the "Testbook Pass Offer" row are dropped silently.
+      skipped: [{ label: "Exam Cycle", value: "Phase XIV/2026" }],
     });
+    // Whatever the script stores must pass the API's own rule.
+    expect(normalizeImportantDates(parsed.importantDates)).toEqual(parsed.importantDates);
+    expect(JSON.stringify(parsed.importantDates)).not.toMatch(/testbook/i);
   });
 
   it("ignores social / Testbook links and pages with no date tables", () => {
@@ -127,11 +143,11 @@ describe("fillExamDetails", () => {
 
     const cgl = await TestSeries.findOne({ slug: "ssc-cgl" }).lean();
     expect(cgl.officialWebsite).toBe("https://ssc.gov.in/");
-    expect(Object.keys(cgl.importantDates)).toHaveLength(4);
+    expect(Object.keys(cgl.importantDates)).toHaveLength(9);
 
     const chsl = await TestSeries.findOne({ slug: "ssc-chsl" }).lean();
     expect(chsl.officialWebsite).toBe("https://admin.example/");
-    expect(Object.keys(chsl.importantDates)).toHaveLength(4);
+    expect(Object.keys(chsl.importantDates)).toHaveLength(9);
 
     const mts = await TestSeries.findOne({ slug: "ssc-mts" }).lean();
     expect([mts.officialWebsite, mts.importantDates]).toEqual(["https://admin.example/", adminDates]);
@@ -139,6 +155,16 @@ describe("fillExamDetails", () => {
     // Second run: only the failed page still needs data.
     const again = await fillExamDetails(plan, { fetchPage: async () => page });
     expect([again.total, again.websiteFilled, again.datesFilled]).toEqual([1, 1, 1]);
+  });
+
+  it("doesn't save a set that's only TBA, so real dates can still be added later", async () => {
+    const cat = await Category.create({ name: "SSC Exams" });
+    await TestSeries.create({ name: "SSC CGL", testbookId: "t1", category: cat._id });
+    const tbaOnly = `<h2>Exam Dates</h2><table><tr><td>Exam Date</td><td>TBA</td></tr><tr><td>Admit Card</td><td>To be announced</td></tr></table>`;
+
+    const stats = await fillExamDetails([{ exams: [plan[0].exams[0]] }], { fetchPage: async () => tbaOnly });
+    expect([stats.datesFilled, stats.noData]).toEqual([0, 1]);
+    expect((await TestSeries.findOne({ testbookId: "t1" }).lean()).importantDates).toBeUndefined();
   });
 
   it("dry run parses every page, honours limit, and writes nothing", async () => {

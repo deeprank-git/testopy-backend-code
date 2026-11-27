@@ -268,13 +268,14 @@ async function runDetails(plan, { dryRun, limit }) {
     for (const p of s.preview) {
       console.log(`\n${p.exam}`);
       if (p.officialWebsite) console.log(`  website: ${p.officialWebsite}`);
-      for (const [label, { from, to }] of Object.entries(p.importantDates ?? {})) {
-        console.log(`  ${label}: ${from === to ? from : `${from} → ${to}`}`);
+      for (const [label, { from, to, text }] of Object.entries(p.importantDates ?? {})) {
+        const dates = from ? (from === to ? from : `${from} → ${to}`) : "";
+        console.log(`  ${label}: ${[dates, text && `"${text}"`].filter(Boolean).join("  ")}`);
       }
     }
   }
   if (s.skipped.length) {
-    console.log(`\nDates that couldn't be read exactly — fill these in the admin panel if needed:`);
+    console.log(`\nDate rows not stored (no date, month or TBA-style status, or text that mentions another site) — check these in the admin panel if needed:`);
     for (const { exam, rows } of s.skipped) {
       console.log(`  ${exam}`);
       for (const r of rows) console.log(`    ${r.label}: ${r.value}`);
