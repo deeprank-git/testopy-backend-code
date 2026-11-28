@@ -3,9 +3,8 @@
 import mongoose from "mongoose";
 import ExamAlert, { EXAM_ALERT_TYPES } from "../models/ExamAlert.js";
 import Category from "../models/Category.js";
-import Notification from "../models/Notification.js";
 import { isValidLink, LINK_RULE_MESSAGE } from "../utils/isValidLink.js";
-import { EXAM_ALERTS_PATH } from "../utils/notificationSource.js";
+import { notifyStudents } from "../utils/examAlertNotify.js";
 import { todayUtcMidnight } from "../utils/dateOnly.js";
 
 const CATEGORY_FIELDS = { path: "category", select: "name slug" };
@@ -185,34 +184,6 @@ export const getAllExamAlertsAdmin = async (req, res) => {
   }
 };
 
-const formatAlertDate = (date) =>
-  new Date(date).toLocaleDateString("en-IN", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-    timeZone: "UTC",
-  });
-
-// One broadcast per new (or, when asked, edited) alert. Failure is reported,
-// never fatal: the alert is saved either way.
-const notifyStudents = async (alert, adminId, { updated = false } = {}) => {
-  try {
-    await Notification.create({
-      user: null,
-      title: updated ? `Updated: ${alert.title}` : alert.title,
-      message: alert.description?.trim() || formatAlertDate(alert.date),
-      type: "info",
-      link: EXAM_ALERTS_PATH,
-      source: "exam_alert",
-      createdBy: adminId,
-    });
-    return true;
-  } catch (error) {
-    console.error("Exam alert notification failed:", error.message);
-    return false;
-  }
-};
-
 // ✅ POST /api/admin/exam-alerts — body may include notify: boolean
 export const createExamAlert = async (req, res) => {
   try {
@@ -242,7 +213,9 @@ export const updateExamAlert = async (req, res) => {
     const error = await validateAlert(req.body, { partial: true });
     if (error) return res.status(400).json({ success: false, message: error });
 
-    const alert = await ExamAlert.findByIdAndUpdate(req.params.id, pickEditable(req.body), {
+    // An admin edit makes the alert theirs: syncExamAlerts stops updating it.
+    const changes = { ...pickEditable(req.body), autoSync: false };
+    const alert = await ExamAlert.findByIdAndUpdate(req.params.id, changes, {
       returnDocument: "after",
       runValidators: true,
     }).populate(CATEGORY_FIELDS);
@@ -266,7 +239,7 @@ export const deleteExamAlert = async (req, res) => {
 
     const alert = await ExamAlert.findByIdAndUpdate(
       req.params.id,
-      { isActive: false },
+      { isActive: false, autoSync: false }, // stays archived: the sync won't revive it
       { returnDocument: "after" }
     );
     if (!alert) return notFound(res);

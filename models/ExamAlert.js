@@ -23,10 +23,23 @@ const examAlertSchema = new mongoose.Schema(
     isActive: { type: Boolean, default: true },
 
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+
+    // Set for alerts made from an exam's importantDates by
+    // scripts/syncExamAlerts.js: the exam and the date's label.
+    testSeries: { type: mongoose.Schema.Types.ObjectId, ref: "TestSeries", default: null },
+    dateLabel: { type: String, default: "" },
+    // true while the sync keeps the alert in line with the exam. Editing or
+    // archiving it in the admin panel turns this off, so the admin's version stays.
+    autoSync: { type: Boolean, default: false },
   },
   { timestamps: true }
 );
 
 examAlertSchema.index({ isActive: 1, date: -1 });
+// One alert per exam date.
+examAlertSchema.index(
+  { testSeries: 1, dateLabel: 1 },
+  { unique: true, partialFilterExpression: { testSeries: { $type: "objectId" } } }
+);
 
 export default mongoose.model("ExamAlert", examAlertSchema);
