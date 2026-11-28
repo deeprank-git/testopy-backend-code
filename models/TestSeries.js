@@ -77,6 +77,14 @@ const testSeriesSchema = new mongoose.Schema(
       default: {},
     },
 
+    // Exam page sections written by admins as plain text ("" = not added).
+    // See utils/examDetails.js for the rules.
+    examDetails: {
+      eligibility: { type: String, default: "" },
+      pattern: { type: String, default: "" },
+      syllabus: { type: String, default: "" },
+    },
+
     negativeMarking: {
       type: Boolean,
       default: false,

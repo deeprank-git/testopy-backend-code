@@ -6,6 +6,32 @@ import TestSeries from "../models/TestSeries.js";
 import { toUploadUrl } from "../middleware/upload.js";
 // importantDates entries: exact { from, to }, free { text }, or both — see utils/importantDates.js.
 import { parseImportantDatesField } from "../utils/importantDates.js";
+import { parseExamDetailsField } from "../utils/examDetails.js";
+
+// The body minus the JSON-string fields, which applyJsonFields parses separately.
+function withoutJsonFields(body) {
+  const rest = { ...body };
+  delete rest.importantDates;
+  delete rest.examDetails;
+  return rest;
+}
+
+// Parses the JSON form fields shared by create and update into `payload`.
+// Returns an error message for a 400, or null.
+function applyJsonFields(body, payload) {
+  const { importantDates, examDetails } = body;
+  try {
+    if (importantDates !== undefined) payload.importantDates = parseImportantDatesField(importantDates);
+  } catch (e) {
+    return `Invalid importantDates: ${e.message}`;
+  }
+  try {
+    if (examDetails !== undefined) payload.examDetails = parseExamDetailsField(examDetails);
+  } catch (e) {
+    return `Invalid examDetails: ${e.message}`;
+  }
+  return null;
+}
 
 // ✅ GET all (filter by category optional)
 // Students/instructors only see published + active series. Admin sees all.
@@ -26,10 +52,12 @@ export const getTestSeries = async (req, res) => {
       filter.category = req.query.category;
     }
 
-    const series = await TestSeries.find(filter)
-      .populate("category", "name slug")
-      .sort({ createdAt: -1 })
-      .lean();
+    const query = TestSeries.find(filter).populate("category", "name slug").sort({ createdAt: -1 });
+    // examDetails can be long and only the exam page (GET /:id) shows it, so
+    // student lists leave it out. Admins keep it: the edit drawer opens from
+    // the list, and saving without it would wipe the sections.
+    if (req.user?.role !== "admin") query.select("-examDetails");
+    const series = await query.lean();
 
     res.status(200).json({
       success: true,
@@ -80,21 +108,12 @@ export const getTestSeriesById = async (req, res) => {
 // ✅ CREATE
 export const createTestSeries = async (req, res) => {
   try {
-    const { importantDates, ...rest } = req.body;
-    const payload = { ...rest, createdBy: req.user.id };
+    const payload = { ...withoutJsonFields(req.body), createdBy: req.user.id };
 
     if (req.uploadEntityId) payload._id = req.uploadEntityId;
 
-    if (importantDates !== undefined) {
-      try {
-        payload.importantDates = parseImportantDatesField(importantDates);
-      } catch (parseError) {
-        return res.status(400).json({
-          success: false,
-          message: `Invalid importantDates: ${parseError.message}`,
-        });
-      }
-    }
+    const jsonError = applyJsonFields(req.body, payload);
+    if (jsonError) return res.status(400).json({ success: false, message: jsonError });
 
     if (req.files?.image?.[0]) {
       payload.image = toUploadUrl(req.files.image[0]);
@@ -122,20 +141,11 @@ export const createTestSeries = async (req, res) => {
 // ✅ UPDATE
 export const updateTestSeries = async (req, res) => {
   try {
-    const { importantDates, ...rest } = req.body;
-    const payload = { ...rest };
+    const payload = withoutJsonFields(req.body);
 
-    // Same rules as create (this path used to skip validation entirely).
-    if (importantDates !== undefined) {
-      try {
-        payload.importantDates = parseImportantDatesField(importantDates);
-      } catch (parseError) {
-        return res.status(400).json({
-          success: false,
-          message: `Invalid importantDates: ${parseError.message}`,
-        });
-      }
-    }
+    // Same rules as create. Each JSON field, when sent, replaces the whole object.
+    const jsonError = applyJsonFields(req.body, payload);
+    if (jsonError) return res.status(400).json({ success: false, message: jsonError });
 
     if (req.files?.image?.[0] || req.files?.notificationPdf?.[0]) {
       const existing = await TestSeries.findById(req.params.id);
