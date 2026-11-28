@@ -6,6 +6,12 @@
 //   officialWebsite — the external link in the page's overview table
 //   importantDates  — { label: { from?, to?, text? } } from the page's date tables
 //
+// With `refreshDates` (--refresh-dates), exams that already have dates are read
+// again and their dates brought up to date ("December 2026" -> the exact day
+// once announced, a moved exam date, a newly listed event). Only entries the
+// import wrote and no admin has edited since are changed — see
+// mergeImportedDates. TestSeries.importedDates records what the import wrote.
+//
 // Testbook writes dates as free text ("22nd June 2026 25th June 2026",
 // "21st September", "December 2026", "TBA"). Each row is stored in the shape
 // utils/importantDates.js accepts:
@@ -242,6 +248,44 @@ export function parseExamPage(html, examName) {
   return { officialWebsite, importantDates, skipped };
 }
 
+const sameEntry = (a, b) =>
+  !!a && !!b && (a.from ?? "") === (b.from ?? "") && (a.to ?? "") === (b.to ?? "") && (a.text ?? "") === (b.text ?? "");
+
+// Pure: merges a fresh parse into an exam's stored dates.
+//   current      — TestSeries.importantDates (may hold admin edits)
+//   lastImported — TestSeries.importedDates, what the import last wrote
+//                  (undefined for exams filled before this record existed)
+//   fresh        — parseExamPage(...).importantDates
+// Rules, per label on the page:
+//   - not stored yet                       -> added
+//   - stored entry equals the last import  -> replaced with the page's entry
+//     (an admin hasn't touched it)
+//   - no record of importing this label    -> only text is upgraded to exact
+//     dates ("December 2026" -> 14 Dec), since we can't tell who wrote it
+//   - anything else is an admin edit       -> kept
+// Exact dates are never replaced by text alone: a page that drops back to
+// "TBA" is more often a layout change than news. Labels the page no longer
+// lists are kept. Returns the new dates, the new import record, and the
+// labels whose stored entry changed.
+export function mergeImportedDates(current = {}, lastImported, fresh) {
+  const dates = { ...(current ?? {}) };
+  const imported = { ...(lastImported ?? {}) };
+  const changed = [];
+  for (const [label, entry] of Object.entries(fresh)) {
+    const cur = dates[label];
+    let take;
+    if (!cur || sameEntry(cur, entry)) take = true;
+    else if (cur.from && !entry.from) take = false;
+    else if (imported[label]) take = sameEntry(cur, imported[label]);
+    else take = !cur.from && !!entry.from;
+    if (!take) continue;
+    if (!sameEntry(cur, entry)) changed.push(label);
+    dates[label] = entry;
+    imported[label] = entry;
+  }
+  return { dates, imported, changed };
+}
+
 const isEmptyDates = (v) => !v || (typeof v === "object" && Object.keys(v).length === 0);
 
 async function mapLimit(items, limit, fn) {
@@ -257,13 +301,26 @@ async function mapLimit(items, limit, fn) {
 
 // Fills officialWebsite / importantDates for the plan's exams where they're
 // empty in the DB. `fetchPage(pageSlug)` returns the page HTML.
-// dryRun: no DB at all — parses every exam in the plan and reports.
+// refreshDates: also re-reads exams that have dates and merges in what's new
+// (mergeImportedDates). dryRun: no DB at all — parses every exam in the plan
+// and reports; it can't be combined with refreshDates.
 export async function fillExamDetails(
   plan,
-  { fetchPage, dryRun = false, limit = Infinity, concurrency = 2, onProgress = () => {} } = {}
+  { fetchPage, dryRun = false, refreshDates = false, limit = Infinity, concurrency = 2, onProgress = () => {} } = {}
 ) {
+  if (dryRun && refreshDates) throw new Error("refreshDates needs the DB, so it can't be a dry run");
   const exams = plan.flatMap((c) => c.exams).filter((e) => e.pageSlug);
-  const stats = { checked: 0, websiteFilled: 0, datesFilled: 0, noData: 0, failed: [], skipped: [], preview: [] };
+  const stats = {
+    checked: 0,
+    websiteFilled: 0,
+    datesFilled: 0,
+    datesRefreshed: 0,
+    noData: 0,
+    failed: [],
+    skipped: [],
+    preview: [],
+    refreshed: [],
+  };
 
   let todo;
   if (dryRun) {
@@ -272,20 +329,22 @@ export async function fillExamDetails(
     const docs = await TestSeries.find({
       $or: [{ testbookId: { $in: exams.map((e) => e.testbookId) } }, { slug: { $in: exams.map((e) => e.slug) } }],
     })
-      .select("slug testbookId officialWebsite importantDates")
+      .select("slug testbookId officialWebsite importantDates importedDates updatedAt")
       .lean();
     const byTb = new Map(docs.filter((d) => d.testbookId).map((d) => [d.testbookId, d]));
     const bySlug = new Map(docs.map((d) => [d.slug, d]));
     todo = exams
       .map((exam) => {
         const doc = byTb.get(exam.testbookId) ?? bySlug.get(exam.slug);
-        return doc && { exam, doc, needWebsite: !doc.officialWebsite, needDates: isEmptyDates(doc.importantDates) };
+        if (!doc) return null;
+        const needDates = isEmptyDates(doc.importantDates);
+        return { exam, doc, needWebsite: !doc.officialWebsite, needDates, refresh: refreshDates && !needDates };
       })
-      .filter((t) => t && (t.needWebsite || t.needDates));
+      .filter((t) => t && (t.needWebsite || t.needDates || t.refresh));
   }
   todo = todo.slice(0, limit);
 
-  await mapLimit(todo, concurrency, async ({ exam, doc, needWebsite, needDates }, idx) => {
+  await mapLimit(todo, concurrency, async ({ exam, doc, needWebsite, needDates, refresh }, idx) => {
     let parsed;
     try {
       parsed = parseExamPage(await fetchPage(exam.pageSlug), exam.name);
@@ -302,7 +361,9 @@ export async function fillExamDetails(
     // A set that's only "TBA" isn't saved: it would mark the field as filled
     // and stop a later run from adding the real dates once they're announced.
     const dates = needDates && Object.values(parsed.importantDates).some(hasTimingInfo) && parsed.importantDates;
-    if (!website && !dates) {
+    const merged = refresh && mergeImportedDates(doc.importantDates, doc.importedDates, parsed.importantDates);
+    const refreshed = merged && merged.changed.length > 0;
+    if (!website && !dates && !refreshed) {
       stats.noData++;
       return;
     }
@@ -314,6 +375,19 @@ export async function fillExamDetails(
       return;
     }
 
+    if (refreshed) {
+      // Only if the exam is unchanged since we read it, so an admin edit
+      // made mid-run still wins (it shows up on the next run instead). Runs
+      // before the website write, which would change updatedAt.
+      const r = await TestSeries.updateOne(
+        { _id: doc._id, updatedAt: doc.updatedAt },
+        { $set: { importantDates: merged.dates, importedDates: merged.imported } }
+      );
+      if (r.modifiedCount) {
+        stats.datesRefreshed++;
+        stats.refreshed.push({ exam: exam.name, labels: merged.changed });
+      }
+    }
     // Filters re-check emptiness, so an admin edit made mid-run still wins.
     if (website) {
       const r = await TestSeries.updateOne(
@@ -325,7 +399,7 @@ export async function fillExamDetails(
     if (dates) {
       const r = await TestSeries.updateOne(
         { _id: doc._id, $or: [{ importantDates: {} }, { importantDates: { $exists: false } }, { importantDates: null }] },
-        { $set: { importantDates: dates } }
+        { $set: { importantDates: dates, importedDates: dates } }
       );
       if (r.modifiedCount) stats.datesFilled++;
     }

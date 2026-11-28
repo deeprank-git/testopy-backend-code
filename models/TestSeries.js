@@ -77,6 +77,14 @@ const testSeriesSchema = new mongoose.Schema(
       default: {},
     },
 
+    // What the Testbook import last wrote into importantDates, per label.
+    // An entry that still matches it hasn't been edited by an admin, so a
+    // later `--refresh-dates` run may update it. Not part of the API.
+    importedDates: {
+      type: mongoose.Schema.Types.Mixed,
+      select: false,
+    },
+
     // Exam page sections written by admins as plain text ("" = not added).
     // See utils/examDetails.js for the rules.
     examDetails: {

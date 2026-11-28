@@ -12,6 +12,9 @@
 //   node scripts/importTestbookExams.js --details         # also fill empty officialWebsite /
 //                                                         #   importantDates from each exam page
 //   node scripts/importTestbookExams.js --details --dry-run --limit 20   # preview details, no DB
+//   node scripts/importTestbookExams.js --details --refresh-dates   # also re-read exams that
+//                                                         #   have dates and update imported
+//                                                         #   ones no admin has edited
 //   node scripts/importTestbookExams.js --logos           # also download exam logos into empty
 //                                                         #   exam images (run ON THE SERVER machine)
 //
@@ -242,12 +245,21 @@ export async function fetchTestbookCatalogue() {
 }
 
 function parseArgs(argv) {
-  const opts = { dryRun: false, includeEmpty: false, update: false, details: false, logos: false, limit: Infinity };
+  const opts = {
+    dryRun: false,
+    includeEmpty: false,
+    update: false,
+    details: false,
+    refreshDates: false,
+    logos: false,
+    limit: Infinity,
+  };
   const flags = {
     "--dry-run": "dryRun",
     "--include-empty": "includeEmpty",
     "--update": "update",
     "--details": "details",
+    "--refresh-dates": "refreshDates",
     "--logos": "logos",
   };
   for (let i = 0; i < argv.length; i++) {
@@ -257,6 +269,10 @@ function parseArgs(argv) {
       opts.limit = Number(argv[++i]);
       if (!Number.isInteger(opts.limit) || opts.limit < 1) throw new Error("--limit needs a positive whole number");
     } else throw new Error(`Unknown option: ${a}`);
+  }
+  if (opts.refreshDates && !opts.details) throw new Error("--refresh-dates only applies with --details");
+  if (opts.refreshDates && opts.dryRun) {
+    throw new Error("--refresh-dates can't be a dry run: it compares pages with the dates in the DB");
   }
   if (opts.limit !== Infinity && !opts.details && !opts.logos) {
     throw new Error("--limit only applies with --details or --logos");
@@ -270,11 +286,13 @@ const fetchExamPage = async (pageSlug) => {
   return html;
 };
 
-async function runDetails(plan, { dryRun, limit }) {
-  console.log(`\nReading exam pages for official website + important dates${dryRun ? " (dry run)" : ""} …`);
+async function runDetails(plan, { dryRun, refreshDates, limit }) {
+  const mode = refreshDates ? " (refreshing dates)" : dryRun ? " (dry run)" : "";
+  console.log(`\nReading exam pages for official website + important dates${mode} …`);
   const s = await fillExamDetails(plan, {
     fetchPage: fetchExamPage,
     dryRun,
+    refreshDates,
     limit,
     onProgress: (done, total) => {
       if (done % 25 === 0 || done === total) console.log(`  ${done}/${total} pages`);
@@ -298,6 +316,10 @@ async function runDetails(plan, { dryRun, limit }) {
       for (const r of rows) console.log(`    ${r.label}: ${r.value}`);
     }
   }
+  if (s.refreshed.length) {
+    console.log(`\nDates refreshed:`);
+    for (const { exam, labels } of s.refreshed) console.log(`  ${exam}: ${labels.join(", ")}`);
+  }
   if (s.failed.length) {
     console.log(`\nPages that failed to load:`);
     for (const f of s.failed) console.log(`  ${f.exam}: ${f.error}`);
@@ -305,6 +327,7 @@ async function runDetails(plan, { dryRun, limit }) {
   console.log(
     `\nDetails: ${s.total} exam(s) needed data, ${s.checked} page(s) read, ${s.failed.length} failed.\n` +
       `  ${dryRun ? "Would fill" : "Filled"}: official website ${s.websiteFilled}, important dates ${s.datesFilled}; ` +
+      (refreshDates ? `refreshed dates on ${s.datesRefreshed} exam(s); ` : "") +
       `${s.noData} page(s) had nothing usable.`
   );
 }
@@ -345,7 +368,7 @@ async function runLogos(plan, { limit, uploadDir }) {
 }
 
 async function main() {
-  const { dryRun, includeEmpty, update, details, logos, limit } = parseArgs(process.argv.slice(2));
+  const { dryRun, includeEmpty, update, details, refreshDates, logos, limit } = parseArgs(process.argv.slice(2));
   const backendRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
   // Check before any network work: logos must land in the server's uploads/.
   const uploadDir = logos && !dryRun ? serverUploadDir(backendRoot) : null;
@@ -381,7 +404,7 @@ async function main() {
       console.log(`Skipped ${s.conflicts.length} rename(s) — target name already in use:`);
       for (const c of s.conflicts) console.log(`  ${c}`);
     }
-    if (details) await runDetails(plan, { dryRun, limit });
+    if (details) await runDetails(plan, { dryRun, refreshDates, limit });
     if (logos) await runLogos(plan, { limit, uploadDir });
   } finally {
     await mongoose.disconnect();

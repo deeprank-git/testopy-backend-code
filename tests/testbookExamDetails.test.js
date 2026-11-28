@@ -1,7 +1,7 @@
 import { connectTestDb, disconnectTestDb, clearTestDb } from "./testDb.js";
 import Category from "../models/Category.js";
 import TestSeries from "../models/TestSeries.js";
-import { parseDateRange, parseExamPage, fillExamDetails } from "../scripts/testbookExamDetails.js";
+import { parseDateRange, parseExamPage, fillExamDetails, mergeImportedDates } from "../scripts/testbookExamDetails.js";
 import { normalizeImportantDates } from "../utils/importantDates.js";
 
 beforeAll(connectTestDb);
@@ -178,5 +178,116 @@ describe("fillExamDetails", () => {
     const cgl = await TestSeries.findOne({ slug: "ssc-cgl" }).lean();
     // Mongoose doesn't store an empty Mixed default, so it's simply absent.
     expect([cgl.officialWebsite, cgl.importantDates]).toEqual(["", undefined]);
+  });
+});
+
+describe("mergeImportedDates", () => {
+  const day = (d) => ({ from: d, to: d });
+
+  it("upgrades, changes and adds imported dates but keeps admin edits", () => {
+    const current = {
+      "Tier 2 Exam Date": { text: "December 2026" }, // imported, untouched
+      "Admit Card": day("2026-08-01"), // imported, then edited by an admin
+      Result: { text: "Soon" }, // admin's own row
+    };
+    const lastImported = { "Tier 2 Exam Date": { text: "December 2026" }, "Admit Card": day("2026-07-01") };
+    const fresh = {
+      "Tier 2 Exam Date": day("2026-12-14"),
+      "Admit Card": day("2026-07-05"),
+      Interview: { text: "TBA" },
+    };
+    const r = mergeImportedDates(current, lastImported, fresh);
+    expect(r.dates).toEqual({
+      "Tier 2 Exam Date": day("2026-12-14"),
+      "Admit Card": day("2026-08-01"),
+      Result: { text: "Soon" },
+      Interview: { text: "TBA" },
+    });
+    expect(r.imported).toEqual({
+      "Tier 2 Exam Date": day("2026-12-14"),
+      "Admit Card": day("2026-07-01"), // still the old import, so the admin's edit stays theirs
+      Interview: { text: "TBA" },
+    });
+    expect(r.changed).toEqual(["Tier 2 Exam Date", "Interview"]);
+  });
+
+  it("never replaces exact dates with text, and keeps rows the page no longer lists", () => {
+    const current = { "Exam Date": day("2026-09-01"), Old: { text: "May 2026" } };
+    const lastImported = { "Exam Date": day("2026-09-01"), Old: { text: "May 2026" } };
+    const r = mergeImportedDates(current, lastImported, { "Exam Date": { text: "TBA" } });
+    expect(r.dates).toEqual(current);
+    expect(r.changed).toEqual([]);
+  });
+
+  it("without a record of past imports, only upgrades text to exact dates", () => {
+    const current = { "Tier 2 Exam Date": { text: "December 2026" }, "Exam Date": day("2026-09-01") };
+    const fresh = { "Tier 2 Exam Date": day("2026-12-14"), "Exam Date": day("2026-09-05") };
+    const r = mergeImportedDates(current, undefined, fresh);
+    expect(r.dates).toEqual({ "Tier 2 Exam Date": day("2026-12-14"), "Exam Date": day("2026-09-01") });
+    expect(r.imported).toEqual({ "Tier 2 Exam Date": day("2026-12-14") });
+    expect(r.changed).toEqual(["Tier 2 Exam Date"]);
+  });
+});
+
+describe("fillExamDetails with refreshDates", () => {
+  const exam = { name: "SSC CGL", slug: "ssc-cgl", testbookId: "t1", pageSlug: "ssc-cgl-exam" };
+  const table = (rows) =>
+    `<h2>Exam Dates</h2><table>${rows.map(([l, v]) => `<tr><td>${l}</td><td>${v}</td></tr>`).join("")}</table>`;
+  const v1 = table([["Tier 1 Exam Date", "30th September 2026"], ["Tier 2 Exam Date", "December 2026"]]);
+  const v2 = table([["Tier 1 Exam Date", "30th September 2026"], ["Tier 2 Exam Date", "14th December 2026"], ["Result", "TBA"]]);
+  const load = async () => TestSeries.findOne({ testbookId: "t1" }).select("+importedDates").lean();
+
+  it("refreshes dates on a later run and leaves rows an admin edited", async () => {
+    const cat = await Category.create({ name: "SSC Exams" });
+    await TestSeries.create({ name: "SSC CGL", testbookId: "t1", category: cat._id, officialWebsite: "https://x.gov.in/" });
+    await fillExamDetails([{ exams: [exam] }], { fetchPage: async () => v1 });
+    const first = await load();
+    expect(first.importedDates).toEqual(first.importantDates);
+
+    // Without the option, an exam that has dates isn't read again.
+    const plain = await fillExamDetails([{ exams: [exam] }], { fetchPage: async () => v2 });
+    expect(plain.total).toBe(0);
+
+    // An admin edits Tier 1; the refresh must leave it alone.
+    await TestSeries.updateOne(
+      { testbookId: "t1" },
+      { $set: { "importantDates.Tier 1 Exam Date": { from: "2026-10-01", to: "2026-10-01" } } }
+    );
+    const stats = await fillExamDetails([{ exams: [exam] }], { fetchPage: async () => v2, refreshDates: true });
+    expect([stats.total, stats.datesRefreshed, stats.datesFilled]).toEqual([1, 1, 0]);
+    expect(stats.refreshed).toEqual([{ exam: "SSC CGL", labels: ["Tier 2 Exam Date", "Result"] }]);
+
+    const after = await load();
+    expect(after.importantDates).toEqual({
+      "Tier 1 Exam Date": { from: "2026-10-01", to: "2026-10-01" },
+      "Tier 2 Exam Date": { from: "2026-12-14", to: "2026-12-14" },
+      Result: { text: "TBA" },
+    });
+    expect(after.officialWebsite).toBe("https://x.gov.in/");
+
+    // Nothing new on the page -> nothing written.
+    const again = await fillExamDetails([{ exams: [exam] }], { fetchPage: async () => v2, refreshDates: true });
+    expect([again.checked, again.datesRefreshed]).toEqual([1, 0]);
+  });
+
+  it("refreshes dates in the same run that fills an empty website", async () => {
+    const cat = await Category.create({ name: "SSC Exams" });
+    await TestSeries.create({ name: "SSC CGL", testbookId: "t1", category: cat._id });
+    await fillExamDetails([{ exams: [exam] }], { fetchPage: async () => v1 });
+    const withSite = `<h2>SSC CGL Overview</h2><table><tr><td>Official Website</td><td><a href="https://ssc.gov.in/">ssc</a></td></tr></table>${v2}`;
+    const stats = await fillExamDetails([{ exams: [exam] }], { fetchPage: async () => withSite, refreshDates: true });
+    expect([stats.websiteFilled, stats.datesRefreshed]).toEqual([1, 1]);
+    expect((await load()).importantDates["Tier 2 Exam Date"]).toEqual({ from: "2026-12-14", to: "2026-12-14" });
+  });
+
+  it("can't be a dry run", async () => {
+    await expect(fillExamDetails([], { fetchPage: async () => "", dryRun: true, refreshDates: true })).rejects.toThrow(/dry run/);
+  });
+
+  it("keeps the import record out of API reads", async () => {
+    const cat = await Category.create({ name: "SSC Exams" });
+    await TestSeries.create({ name: "SSC CGL", testbookId: "t1", category: cat._id });
+    await fillExamDetails([{ exams: [exam] }], { fetchPage: async () => v1 });
+    expect((await TestSeries.findOne({ testbookId: "t1" }).lean()).importedDates).toBeUndefined();
   });
 });
